@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/main/schema/locale.json",
+  "meta": {
+    "title": "全局查找",
+    "description": "按 Ctrl+F 在所有工作区、所有对话中本地全文搜索，思考链与对话文本分栏显示，并可跳转到命中位置。"
+  },
+  "label": {
+    "title": "全局查找",
+    "placeholder": "输入要查找的文字…",
+    "empty": "输入文字后按 Enter 或点「查找」开始。",
+    "ready": "按 Enter 或点「查找」开始查找。",
+    "search": "查找",
+    "hideArchived": "隐藏已归档",
+    "hideArchivedHint": "勾选后结果里不再列出已归档对话的命中",
+    "searching": "正在本地查找…",
+    "noResults": "没有找到匹配的对话",
+    "noResultsHidden": "没有可显示的命中：另外 {count} 条都在已归档对话里（已按你的选择隐藏）",
+    "results": "找到 {count} 处命中，共 {sessions} 个对话",
+    "workspace": "工作区",
+    "ungrouped": "未归属工作区",
+    "occurrences": "{count} 处",
+    "elapsed": "耗时 {ms} ms",
+    "truncated": "结果过多，仅显示前 {count} 条",
+    "hint": "Enter 或点「查找」开始 · 点结果跳转 · Esc 关闭",
+    "close": "关闭",
+    "failed": "查找失败：{message}",
+    "thinkingTitle": "思考链",
+    "conversationTitle": "对话文本",
+    "paneEmpty": "此栏没有命中",
+    "archivedBadge": "已归档",
+    "archivedNotice": "这个对话已经归档，不能跳转。可以在侧栏的归档列表里取消归档后再试。"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/main/schema/locale.json",
+  "meta": {
+    "title": "Find in conversations",
+    "description": "Ctrl+F searches every workspace and conversation locally, showing reasoning and conversation text in separate panes, then jumps to the matching paragraph."
+  },
+  "label": {
+    "title": "Find in conversations",
+    "placeholder": "Type text to find…",
+    "empty": "Type text, then press Enter or click Find.",
+    "ready": "Press Enter or click Find to search.",
+    "search": "Find",
+    "hideArchived": "Hide archived",
+    "hideArchivedHint": "Leave hits from archived conversations out of the panes",
+    "searching": "Searching locally…",
+    "noResults": "No conversation contains that text",
+    "noResultsHidden": "Nothing to show: {count} more match(es) sit in archived conversations, which you chose to hide",
+    "results": "{count} matches in {sessions} conversations",
+    "workspace": "Workspace",
+    "ungrouped": "No workspace",
+    "occurrences": "{count} hits",
+    "elapsed": "{ms} ms",
+    "truncated": "Too many results, showing the first {count}",
+    "hint": "Enter or Find to search · click a result to jump · Esc close",
+    "close": "Close",
+    "failed": "Search failed: {message}",
+    "thinkingTitle": "Reasoning",
+    "conversationTitle": "Conversation",
+    "paneEmpty": "No match in this pane",
+    "archivedBadge": "Archived",
+    "archivedNotice": "This conversation is archived and cannot be opened. Unarchive it from the sidebar list, then try again."
+  }
+}
