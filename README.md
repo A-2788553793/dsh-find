@@ -6,6 +6,8 @@
 
 **搜索全程本地执行，不调用任何模型，不消耗 token。**
 
+仓库：<https://github.com/A-2788553793/dsh-find> · 许可：MIT
+
 ## 用法
 
 | 操作 | 说明 |
@@ -94,13 +96,20 @@
 
 ## 安装
 
+先从 GitHub 取一份源码（或直接用本地工作副本）：
+
 ```bash
-# 以 source link 方式装进当前 profile
-plugin_manager install_bundle  E:\\DshWP\\3\\dsh-find
+git clone https://github.com/A-2788553793/dsh-find.git
+```
+
+再把它以 source link 方式装进当前 profile：
+
+```bash
+plugin_manager install_bundle  <克隆下来的 dsh-find 目录>
 
 # 改过代码要重装：先移除再安装（重复 install 会报 already-installed）
 plugin_manager remove_bundle  dsh-find
-plugin_manager install_bundle  E:\\DshWP\\3\\dsh-find
+plugin_manager install_bundle  <克隆下来的 dsh-find 目录>
 ```
 
 装/重装后刷新一次页面（Client 半的 JS 由 bundle 提供）。
