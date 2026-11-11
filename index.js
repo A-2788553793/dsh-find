@@ -154,6 +154,23 @@ function extractBlocks(event) {
   return blocks;
 }
 
+/**
+ * Which side of the conversation a hit came from.
+ * `user/message` carries system, plugin and scheduler injections too, so only
+ * `source.kind === 'user'` counts as something the user actually typed.
+ */
+function speakerOf(eventType, data) {
+  if (eventType === 'user/message') {
+    const source = data !== null && typeof data === 'object' ? data.source : null;
+    const kind = source !== null && typeof source === 'object' ? source.kind : null;
+    if (typeof kind !== 'string' || kind.length === 0) return 'user';
+    return kind === 'user' ? 'user' : 'system';
+  }
+  if (eventType === 'assistant/message') return 'assistant';
+  if (eventType === 'tool/result') return 'tool';
+  return null;
+}
+
 /* ----------------------------------------------------------------- search */
 
 async function runSearch(ctx, query, options, signal) {
@@ -238,7 +255,14 @@ async function runSearch(ctx, query, options, signal) {
         const built = buildSnippet(document.text, query, options.maxChars);
         if (built === null) continue;
         if (hits.length >= options.perSession) break;
-        hits.push({ seq: document.seq, type: document.type, role: null, channel: 'conversation', ...built });
+        hits.push({
+          seq: document.seq,
+          type: document.type,
+          role: null,
+          speaker: speakerOf(document.type, null),
+          channel: 'conversation',
+          ...built,
+        });
       }
       if (hits.length === 0) return null;
       return { record, hits, occurrences: sumOccurrences(hits) };
@@ -274,6 +298,7 @@ async function runSearch(ctx, query, options, signal) {
           seq: event.seq,
           type: event.type,
           role: block.role,
+          speaker: speakerOf(event.type, event.data),
           channel: block.channel,
           ...built,
         });

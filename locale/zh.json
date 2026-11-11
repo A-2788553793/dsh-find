@@ -28,6 +28,11 @@
     "conversationTitle": "对话文本",
     "paneEmpty": "此栏没有命中",
     "archivedBadge": "已归档",
+    "speakerUser": "用户",
+    "speakerAssistant": "AI",
+    "speakerTool": "工具",
+    "speakerSystem": "系统",
+    "speakerFiltered": "没有可显示的命中：{count} 条已按来源筛选隐藏",
     "archivedNotice": "这个对话已经归档，不能跳转。可以在侧栏的归档列表里取消归档后再试。"
   }
 }

@@ -28,6 +28,11 @@
     "conversationTitle": "Conversation",
     "paneEmpty": "No match in this pane",
     "archivedBadge": "Archived",
+    "speakerUser": "User",
+    "speakerAssistant": "AI",
+    "speakerTool": "Tool",
+    "speakerSystem": "System",
+    "speakerFiltered": "Nothing to show: {count} hit(s) hidden by the source filter",
     "archivedNotice": "This conversation is archived and cannot be opened. Unarchive it from the sidebar list, then try again."
   }
 }

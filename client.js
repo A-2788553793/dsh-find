@@ -12,6 +12,13 @@ window.__ModuleLoader__.load({
     const TOTAL_HITS = 120;
     const PER_SESSION = 3;
     const FLASH_CLASS = 'dsh-find-flash';
+    const SPEAKER_LABELS = {
+      user: 'speakerUser',
+      assistant: 'speakerAssistant',
+      tool: 'speakerTool',
+      system: 'speakerSystem',
+    };
+    const SPEAKER_ORDER = ['user', 'assistant', 'tool', 'system'];
 
     const DICTS = {
       zh: {
@@ -36,6 +43,11 @@ window.__ModuleLoader__.load({
         conversationTitle: '对话文本',
         paneEmpty: '此栏没有命中',
         archivedBadge: '已归档',
+        speakerUser: '用户',
+        speakerAssistant: 'AI',
+        speakerTool: '工具',
+        speakerSystem: '系统',
+        speakerFiltered: '没有可显示的命中：{count} 条已按来源筛选隐藏',
         archivedNotice: '这个对话已经归档，不能跳转。可以在侧栏的归档列表里取消归档后再试。',
       },
       en: {
@@ -60,6 +72,11 @@ window.__ModuleLoader__.load({
         conversationTitle: 'Conversation',
         paneEmpty: 'No match in this pane',
         archivedBadge: 'Archived',
+        speakerUser: 'User',
+        speakerAssistant: 'AI',
+        speakerTool: 'Tool',
+        speakerSystem: 'System',
+        speakerFiltered: 'Nothing to show: {count} hit(s) hidden by the source filter',
         archivedNotice: 'This conversation is archived and cannot be opened. Unarchive it from the sidebar list, then try again.',
       },
     };
@@ -85,6 +102,14 @@ window.__ModuleLoader__.load({
       '.dsh-find-pane + .dsh-find-pane{border-left:2px solid var(--dsw-alias-border-l1);}',
       '.dsh-find-pane-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px 8px;font-size:14px;font-weight:700;letter-spacing:.01em;color:var(--dsw-alias-label-primary);border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
       '.dsh-find-pane-count{margin-left:auto;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-secondary);}',
+      '.dsh-find-chips{display:flex;align-items:center;gap:5px;margin-left:12px;}',
+      '.dsh-find-chip{font-family:inherit;font-size:11px;font-weight:500;line-height:1.7;padding:0 9px;border-radius:999px;border:0.5px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;white-space:nowrap;transition:background .12s,color .12s,border-color .12s;}',
+      '.dsh-find-chip:hover{color:var(--dsw-alias-label-secondary);}',
+      '.dsh-find-chip[data-on="true"]{font-weight:600;}',
+      '.dsh-find-chip[data-speaker="user"][data-on="true"]{background:rgba(59,130,246,.13);border-color:rgba(59,130,246,.42);color:#3b82f6;}',
+      '.dsh-find-chip[data-speaker="assistant"][data-on="true"]{background:rgba(16,185,129,.13);border-color:rgba(16,185,129,.42);color:#0d9f74;}',
+      '.dsh-find-chip[data-speaker="tool"][data-on="true"]{background:rgba(139,92,246,.13);border-color:rgba(139,92,246,.42);color:#8b5cf6;}',
+      '.dsh-find-chip[data-speaker="system"][data-on="true"]{background:rgba(245,158,11,.13);border-color:rgba(245,158,11,.42);color:#d97706;}',
       '.dsh-find-pane-body{flex:1;min-height:0;overflow:auto;padding:8px 0 10px;}',
       '.dsh-find-pane-empty{padding:26px 16px;text-align:center;font-size:12px;color:var(--dsw-alias-label-secondary);opacity:.8;}',
       '.dsh-find-body{flex:1;min-height:0;overflow:auto;padding:4px 0 6px;}',
@@ -106,6 +131,11 @@ window.__ModuleLoader__.load({
       '.dsh-find-row:hover{background:var(--dsw-alias-bg-layer-1);}',
       '.dsh-find-snippet{margin:0;font-size:13px;line-height:1.62;white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-secondary);max-height:7.4em;overflow:hidden;}',
       '.dsh-find-snippet mark{background:var(--dsw-alias-brand-primary);color:#fff;border-radius:3px;padding:0 1px;}',
+      '.dsh-find-speaker{display:inline-block;margin:0 0 4px;font-size:11px;line-height:1.3;padding:1px 6px;border-radius:4px;border:0.5px solid transparent;font-weight:600;letter-spacing:.01em;white-space:nowrap;}',
+      '.dsh-find-speaker[data-speaker="user"]{background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.40);color:#3b82f6;}',
+      '.dsh-find-speaker[data-speaker="assistant"]{background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.40);color:#0d9f74;}',
+      '.dsh-find-speaker[data-speaker="tool"]{background:rgba(139,92,246,.12);border-color:rgba(139,92,246,.40);color:#8b5cf6;}',
+      '.dsh-find-speaker[data-speaker="system"]{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.40);color:#d97706;}',
       '.dsh-find-ellipsis{color:var(--dsw-alias-label-secondary);opacity:.7;}',
       '.dsh-find-foot{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px;border-top:0.5px solid var(--dsw-alias-border-l1);font-size:11.5px;color:var(--dsw-alias-label-secondary);}',
       '.dsh-find-foot-right{white-space:nowrap;}',
@@ -126,6 +156,7 @@ window.__ModuleLoader__.load({
       error: '',
       payload: null,
       hideArchived: false,
+      speakers: { user: true, assistant: true, tool: true, system: true },
       notice: '',
     };
     const listeners = new Set();
@@ -144,6 +175,12 @@ window.__ModuleLoader__.load({
           /* a subscriber must never break the palette */
         }
       }
+    }
+
+    function toggleSpeaker(key) {
+      const next = Object.assign({}, store.speakers || {});
+      next[key] = next[key] !== true;
+      setStore({ speakers: next });
     }
 
     function subscribe(listener) {
@@ -545,12 +582,39 @@ window.__ModuleLoader__.load({
          the two panes, it never changes what the Host scanned. */
       const hits = state.hideArchived ? loaded.filter((hit) => hit.archived !== true) : loaded;
       const split = splitHits(hits);
+      /* The right pane can show every side at once or any subset of them; the
+         thinking pane is entirely model reasoning and is never filtered. */
+      const speakers = state.speakers || {};
+      const speakerOf = (hit) => (SPEAKER_LABELS[hit.speaker] ? hit.speaker : 'assistant');
+      const shownConversation = split.conversation.filter((hit) => speakers[speakerOf(hit)] !== false);
+      const speakerHidden = split.conversation.length - shownConversation.length;
       const grouped = {
         thinking: groupHits(split.thinking),
-        conversation: groupHits(split.conversation),
+        conversation: groupHits(shownConversation),
       };
 
       if (!state.open) return null;
+
+      const renderSpeakerChips = () =>
+        h(
+          'div',
+          { className: 'dsh-find-chips' },
+          SPEAKER_ORDER.map((key) =>
+            h(
+              'button',
+              {
+                key,
+                type: 'button',
+                className: 'dsh-find-chip',
+                'data-speaker': key,
+                'data-on': speakers[key] === true ? 'true' : 'false',
+                title: t(SPEAKER_LABELS[key]),
+                onClick: () => toggleSpeaker(key),
+              },
+              t(SPEAKER_LABELS[key]),
+            ),
+          ),
+        );
 
       const renderPane = (channel, labelKey) => {
         const bundle = grouped[channel];
@@ -574,6 +638,7 @@ window.__ModuleLoader__.load({
               ),
             );
             for (const hit of session.hits) {
+              const speaker = SPEAKER_LABELS[hit.speaker] ? hit.speaker : 'assistant';
               const snippet = String(hit.snippet || '');
               const head = hit.clippedStart ? h('span', { className: 'dsh-find-ellipsis', key: 'cs' }, '…') : null;
               const tail = hit.clippedEnd ? h('span', { className: 'dsh-find-ellipsis', key: 'ce' }, '…') : null;
@@ -587,6 +652,13 @@ window.__ModuleLoader__.load({
                     'data-archived': hit.archived === true ? 'true' : 'false',
                     onClick: () => jumpToHit(hit),
                   },
+                  channel === 'conversation'
+                    ? h(
+                        'span',
+                        { className: 'dsh-find-speaker', key: 'speaker', 'data-speaker': speaker },
+                        t(SPEAKER_LABELS[speaker]),
+                      )
+                    : null,
                   h(
                     'p',
                     { className: 'dsh-find-snippet' },
@@ -641,12 +713,21 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dsh-find-pane-head' },
             h('span', null, t(labelKey)),
+            channel === 'conversation' ? renderSpeakerChips() : null,
             h('span', { className: 'dsh-find-pane-count' }, String(bundle.flat)),
           ),
           h(
             'div',
             { className: 'dsh-find-pane-body' },
-            cards.length === 0 ? h('div', { className: 'dsh-find-pane-empty' }, t('paneEmpty')) : cards,
+            cards.length === 0
+              ? h(
+                  'div',
+                  { className: 'dsh-find-pane-empty' },
+                  channel === 'conversation' && speakerHidden > 0
+                    ? t('speakerFiltered', { count: speakerHidden })
+                    : t('paneEmpty'),
+                )
+              : cards,
           ),
         );
       };
