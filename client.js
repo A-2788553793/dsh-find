@@ -850,7 +850,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * `/find-text` runs in the Host half; this long-poll carries the request into
+     * `/find-text-ui` runs in the Host half; this long-poll carries the request into
      * the page and opens the palette with it. The server holds the request for up
      * to 20s, so an idle page costs one open connection and no model call.
      */

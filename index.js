@@ -408,7 +408,20 @@ function sumOccurrences(hits) {
 /* ----------------------------------------------------------------- pending */
 
 /**
- * The last `/find-text` request. A command runs in the Host half, but the panel
+ * What the command/tool registration actually achieved. Exposed on /health so a
+ * silent no-op ("I typed the command and nothing happened") can be diagnosed
+ * without restarting anything.
+ */
+const registrationStatus = { commands: [], commandErrors: [], tool: null, toolErrors: [], runs: [] };
+
+/** Remember the last few command invocations, so a silent no-op is observable. */
+function noteRun(name, args) {
+  registrationStatus.runs.push({ name, args: String(args ?? '').slice(0, 80), at: new Date().toISOString() });
+  if (registrationStatus.runs.length > 5) registrationStatus.runs.shift();
+}
+
+/**
+ * The last `/find-text-ui` request. A command runs in the Host half, but the panel
  * lives in the page, so the two halves meet through a long-polled handshake:
  * the command publishes one request here, and every connected page picks it up.
  */
@@ -462,11 +475,12 @@ function replyPending(res) {
 }
 
 function handleFindCommand(invocation) {
+  noteRun('find-text-ui', invocation?.rawInput);
   const raw = String(invocation?.rawInput ?? '').trim();
-  const stripped = raw.replace(/^\/?find-text\b\s*/i, '').trim();
+  const stripped = raw.replace(/^\/?find-text-ui\b\s*/i, '').trim();
   const query = (stripped.length > 0 ? stripped : raw).slice(0, 200);
   if (query.length === 0) {
-    return { kind: 'error', text: '用法：/find-text <要查找的文字>' };
+    return { kind: 'error', text: '用法：/find-text-ui <要查找的文字>' };
   }
   publishFind(query);
   return { kind: 'success', text: '正在打开查找窗口：' + query };
@@ -476,24 +490,33 @@ function registerFindCommand(ctx) {
   const attach = (scope, registry) => {
     if (registry === undefined || registry === null || typeof registry.register !== 'function') return;
     const register = () => {
-      const dispose = registry.register({
-        name: 'find-text',
-        description: '在本机全部工作区、全部对话中查找文本，并打开查找窗口',
-        input: { hint: '要查找的文字' },
-        handler: handleFindCommand,
-      });
+      /* One command only: it hands the query to the page and the panel does the
+         searching. Agents use the `find_text` tool when they want the text. */
+      const disposers = [];
+      disposers.push(
+        registry.register({
+          name: 'find-text-ui',
+          description: '在本机全部工作区、全部对话中查找文本，并打开查找窗口',
+          input: { hint: '要查找的文字（输入后按回车执行）' },
+          handler: handleFindCommand,
+        }),
+      );
+      registrationStatus.commands = ['find-text-ui'];
       return () => {
-        if (typeof dispose === 'function') dispose();
+        for (const dispose of disposers) {
+          if (typeof dispose === 'function') dispose();
+        }
       };
     };
     try {
       if (typeof scope?.effect === 'function') {
-        scope.effect(register, 'dsh-find: find-text command');
+        scope.effect(register, 'dsh-find: find-text-ui command');
       } else {
         register();
       }
     } catch (err) {
-      console.warn('[dsh-find] failed to register the find-text command', err);
+      registrationStatus.commandErrors.push(String(err?.message ?? err));
+      console.warn('[dsh-find] failed to register the find-text-ui command', err);
     }
   };
 
@@ -506,6 +529,195 @@ function registerFindCommand(ctx) {
   }
 
   attach(ctx, typeof ctx.get === 'function' ? ctx.get('commands') : ctx.commands);
+}
+
+/* ------------------------------------------------------------ text report */
+
+/**
+ * The search index is also useful without any UI: an agent tool and a slash
+ * command both answer "where does this text appear?" as plain text, so a reply
+ * can quote the result without a round trip through the panel.
+ *
+ * Reports are deliberately compact — a chat bubble has to stay readable — so
+ * the snippet budget is smaller than the panel's default.
+ */
+const REPORT_DEFAULTS = { maxChars: 220, perSession: 2, total: 40 };
+
+const SPEAKER_NAMES = { user: '用户', assistant: 'AI', tool: '工具', system: '系统' };
+const CHANNEL_NAMES = { thinking: '思考', conversation: '对话' };
+
+function flattenExcerpt(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function formatSeconds(tookMs) {
+  return (Math.max(0, Number(tookMs) || 0) / 1000).toFixed(1);
+}
+
+function formatSearchReport(payload) {
+  const hits = Array.isArray(payload?.hits) ? payload.hits : [];
+  const query = String(payload?.query ?? '');
+  const scanned = Number(payload?.sessionsScanned ?? 0);
+  if (hits.length === 0) {
+    return `没有找到「${query}」。扫描了 ${scanned} 个对话，用时 ${formatSeconds(payload?.tookMs)} 秒。`;
+  }
+
+  const sessions = new Set(hits.map((hit) => String(hit.sessionId))).size;
+  const truncated =
+    payload?.truncated === true ||
+    payload?.truncatedChannels?.thinking === true ||
+    payload?.truncatedChannels?.conversation === true;
+  /* Keep the first line short: the command card shows the whole text on one
+     shimmering line until it is expanded, so a long first line is unreadable. */
+  const lines = [
+    `找到 ${hits.length} 处「${query}」，涉及 ${sessions} 个对话。`,
+    `扫描 ${scanned} 个对话，用时 ${formatSeconds(payload?.tookMs)} 秒${truncated ? '；结果已按上限截断' : ''}。`,
+    '',
+  ];
+
+  /* Group by workspace, then by conversation, so the reader sees the same
+     shape as the panel: workspace card → conversation → excerpt. */
+  const groups = new Map();
+  for (const hit of hits) {
+    const workspace = String(hit.workspaceTitle ?? '未归属工作区');
+    if (!groups.has(workspace)) groups.set(workspace, new Map());
+    const bySession = groups.get(workspace);
+    const sessionId = String(hit.sessionId);
+    if (!bySession.has(sessionId)) {
+      bySession.set(sessionId, {
+        title: String(hit.title ?? '无标题对话'),
+        archived: hit.archived === true,
+        hits: [],
+      });
+    }
+    bySession.get(sessionId).hits.push(hit);
+  }
+
+  let index = 0;
+  for (const [workspace, bySession] of groups) {
+    lines.push(`■ 工作区「${workspace}」`);
+    for (const session of bySession.values()) {
+      const badge = session.archived ? '，已归档（界面里打不开）' : '';
+      lines.push(`  · 对话「${session.title}」（${sumOccurrences(session.hits)} 处${badge}）`);
+      for (const hit of session.hits) {
+        index += 1;
+        const channel = CHANNEL_NAMES[hit.channel] ?? '对话';
+        const speaker = SPEAKER_NAMES[hit.speaker] ?? 'AI';
+        const seq = hit.seq === undefined ? '' : `，seq ${hit.seq}`;
+        const lead = hit.clippedStart === true ? '…' : '';
+        const tail = hit.clippedEnd === true ? '…' : '';
+        lines.push(`    ${index}) [${channel}·${speaker}${seq}] ${lead}${flattenExcerpt(hit.snippet)}${tail}`);
+      }
+    }
+    lines.push('');
+  }
+  lines.push('要看上下文或点开命中位置，用 /find-text-ui 或 Ctrl+F 打开窗口。');
+  return lines.join('\n');
+}
+
+function reportOptions(args) {
+  return {
+    ...DEFAULTS,
+    maxChars: clampInt(args?.maxChars, REPORT_DEFAULTS.maxChars, 120, 2000),
+    perSession: clampInt(args?.perSession, REPORT_DEFAULTS.perSession, 1, 12),
+    total: clampInt(args?.total, REPORT_DEFAULTS.total, 1, 200),
+  };
+}
+
+function findTextTool(ctx) {
+  return {
+    name: 'find_text',
+    description: [
+      'Search every workspace and every conversation on this machine for a piece of text, entirely',
+      'locally (no network, no model calls, no token cost for the search itself). Use it whenever the',
+      'user asks where something was said or written before — "查找/找一下 xxx", "哪次对话里提过 xxx",',
+      '"我之前说过 xxx 吗", "which conversation mentioned xxx".',
+      '',
+      'It returns a grouped text report: workspace → conversation → each matching excerpt, with the',
+      'channel (思考链 / 对话文本), the speaker (用户 / AI / 工具 / 系统), the log sequence number, and',
+      'whether the conversation is archived. Quote that report back to the user; if they want to jump to',
+      'the spot or preview images, tell them to open the panel with Ctrl+F or /find-text-ui.',
+      '',
+      'Searches both the reasoning (思考链) and the visible messages of every conversation, including',
+      'tool output. Archived conversations are searched too and sorted last.',
+    ].join('\n'),
+    parameters: {
+      query: {
+        type: 'string',
+        required: true,
+        description: '要查找的文字，1–200 字符，区分大小写不敏感（内部按小写比较）。',
+      },
+      maxChars: {
+        type: 'number',
+        description: '每条命中片段最多保留多少字符（120–2000，默认 220）。',
+      },
+      perSession: {
+        type: 'number',
+        description: '每个对话每栏（思考链 / 对话文本）最多保留几条（1–12，默认 2）。',
+      },
+      total: {
+        type: 'number',
+        description: '总共最多返回多少条命中（1–200，默认 40）。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text'],
+        properties: {
+          text: { type: 'string', description: 'Markdown 文本报告：按工作区、对话分组的命中片段。' },
+        },
+      },
+      render(args, value) {
+        return [{ type: 'text', text: value.text }];
+      },
+    },
+    timeoutMs: 120_000,
+    isConcurrencySafe() {
+      return true;
+    },
+    async execute(args) {
+      const query = String(args?.query ?? '').trim().slice(0, 200);
+      if (query.length === 0) {
+        return { text: '没有给出要查找的文字：请传入 query。' };
+      }
+      const payload = await runSearch(ctx, query, reportOptions(args), undefined);
+      return { text: formatSearchReport(payload) };
+    },
+  };
+}
+
+function registerFindTool(ctx) {
+  const attach = (scope, registry) => {
+    if (registry === undefined || registry === null || typeof registry.register !== 'function') return;
+    const register = () => {
+      const dispose = registry.register(findTextTool(ctx));
+      registrationStatus.tool = 'find_text';
+      return () => {
+        if (typeof dispose === 'function') dispose();
+      };
+    };
+    try {
+      if (typeof scope?.effect === 'function') {
+        scope.effect(register, 'dsh-find: find-text tool');
+      } else {
+        register();
+      }
+    } catch (err) {
+      registrationStatus.toolErrors.push(String(err?.message ?? err));
+      console.warn('[dsh-find] failed to register the find-text tool', err);
+    }
+  };
+
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['tools'], (sub) => {
+      attach(sub, sub.tools ?? (typeof sub.get === 'function' ? sub.get('tools') : undefined));
+    });
+    return;
+  }
+
+  attach(ctx, typeof ctx.get === 'function' ? ctx.get('tools') : ctx.tools);
 }
 
 /* ------------------------------------------------------------------ media */
@@ -1195,7 +1407,16 @@ async function handleRequest(ctx, req, res) {
   const path = (req.url ?? '').split('?')[0];
 
   if (path === `${ROUTE_PREFIX}/health`) {
-    sendJson(res, 200, { ok: true, route: ROUTE_PREFIX, version: 6 });
+    sendJson(res, 200, {
+      ok: true,
+      route: ROUTE_PREFIX,
+      version: 7,
+      commands: registrationStatus.commands,
+      commandErrors: registrationStatus.commandErrors,
+      tool: registrationStatus.tool,
+      toolErrors: registrationStatus.toolErrors,
+      runs: registrationStatus.runs,
+    });
     return;
   }
 
@@ -1345,6 +1566,12 @@ export function apply(ctx) {
     registerFindCommand(ctx);
   } catch (err) {
     console.warn('[dsh-find] command registration failed', err);
+  }
+
+  try {
+    registerFindTool(ctx);
+  } catch (err) {
+    console.warn('[dsh-find] tool registration failed', err);
   }
 
   const route = {
