@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
     const TOTAL_HITS = 120;
     const PER_SESSION = 3;
     const FLASH_CLASS = 'dsh-find-flash';
+    const MEDIA_TOTAL = 800;
     const SPEAKER_LABELS = {
       user: 'speakerUser',
       assistant: 'speakerAssistant',
@@ -42,6 +43,30 @@ window.__ModuleLoader__.load({
         thinkingTitle: '思考链',
         conversationTitle: '对话文本',
         paneEmpty: '此栏没有命中',
+        tabText: '文本',
+        tabMedia: '图片/视频',
+        mediaSummary: '{count} 个媒体 · {sessions} 个对话',
+        mediaCount: '{count} 个',
+        mediaEmpty: '还没有找到图片或视频。',
+        mediaLoading: '正在扫描本机媒体…',
+        mediaRefresh: '重新扫描',
+        mediaHint: '点工作区/对话可展开收起 · 点缩略图放大 · Esc 关闭',
+        mediaVideo: '视频',
+        mediaRefreshHint: '重新读取工作区与对话列表（不会读取对话内容）',
+        mediaOutline: '{workspaces} 个工作区 · {sessions} 个对话 · 已加载 {loaded} 个媒体',
+        mediaCollapseAll: '一键折叠',
+        mediaCollapseAllHint: '收起所有工作区和对话，只留下目录（不重新读取）',
+        mediaExpandAll: '一键展开',
+        mediaExpandAllHint: '读取全部对话，载入所有图片和视频（较慢）',
+        mediaExpanding: '展开中…',
+        mediaTreeLoading: '正在整理工作区与对话…',
+        mediaReading: '读取中…',
+        mediaReadFailed: '读取失败，点一下重试',
+        mediaNone: '无',
+        mediaSessionCount: '{count} 个对话',
+        mediaCountTwo: '{count} 个媒体 · {sessions} 个对话',
+        mediaNoSessions: '这个工作区没有对话',
+        mediaLoadedTotal: '已加载 {count} 个媒体 · {sessions} 个对话',
         archivedBadge: '已归档',
         speakerUser: '用户',
         speakerAssistant: 'AI',
@@ -49,6 +74,18 @@ window.__ModuleLoader__.load({
         speakerSystem: '系统',
         speakerFiltered: '没有可显示的命中：{count} 条已按来源筛选隐藏',
         archivedNotice: '这个对话已经归档，不能跳转。可以在侧栏的归档列表里取消归档后再试。',
+        menuSaveAs: '另存为…',
+        savedAs: '已另存为 {name}',
+        savedDownload: '已下载到默认下载目录：{name}',
+        saveFailed: '另存为失败',
+        menuReveal: '打开文件所在位置',
+        menuDelete: '删除',
+        menuDeleteConfirm: '确认删除',
+        deleteProtected: '这是对话里的附件，删掉会让那段对话的图片永久失效，只能打开所在文件夹。',
+        deleteFailed: '删除失败',
+        deleted: '已删除 {name}',
+        revealMissing: '文件已经不在原来的位置了',
+        revealFailed: '打开失败',
       },
       en: {
         title: 'Find in conversations',
@@ -71,6 +108,30 @@ window.__ModuleLoader__.load({
         thinkingTitle: 'Reasoning',
         conversationTitle: 'Conversation',
         paneEmpty: 'No match in this pane',
+        tabText: 'Text',
+        tabMedia: 'Images/Videos',
+        mediaSummary: '{count} media · {sessions} conversations',
+        mediaCount: '{count}',
+        mediaEmpty: 'No images or videos found yet.',
+        mediaLoading: 'Scanning local media…',
+        mediaRefresh: 'Rescan',
+        mediaHint: 'Click a workspace or conversation to fold it · click a thumbnail to enlarge · Esc to close',
+        mediaVideo: 'Video',
+        mediaRefreshHint: 'Re-read the workspace and conversation list (no conversation is read)',
+        mediaOutline: '{workspaces} workspaces · {sessions} conversations · {loaded} media loaded',
+        mediaCollapseAll: 'Collapse all',
+        mediaCollapseAllHint: 'Fold every workspace and conversation, leaving only the outline (nothing re-read)',
+        mediaExpandAll: 'Expand all',
+        mediaExpandAllHint: 'Read every conversation and load all images and videos (slow)',
+        mediaExpanding: 'Expanding…',
+        mediaTreeLoading: 'Listing workspaces and conversations…',
+        mediaReading: 'Reading…',
+        mediaReadFailed: 'Read failed; click to retry',
+        mediaNone: 'none',
+        mediaSessionCount: '{count} conversations',
+        mediaCountTwo: '{count} media · {sessions} conversations',
+        mediaNoSessions: 'This workspace has no conversations',
+        mediaLoadedTotal: '{count} media loaded · {sessions} conversations',
         archivedBadge: 'Archived',
         speakerUser: 'User',
         speakerAssistant: 'AI',
@@ -78,6 +139,18 @@ window.__ModuleLoader__.load({
         speakerSystem: 'System',
         speakerFiltered: 'Nothing to show: {count} hit(s) hidden by the source filter',
         archivedNotice: 'This conversation is archived and cannot be opened. Unarchive it from the sidebar list, then try again.',
+        menuSaveAs: 'Save as…',
+        savedAs: 'Saved as {name}',
+        savedDownload: 'Downloaded to your default folder: {name}',
+        saveFailed: 'Save failed',
+        menuReveal: 'Open file location',
+        menuDelete: 'Delete',
+        menuDeleteConfirm: 'Confirm delete',
+        deleteProtected: 'This is a conversation attachment; deleting it would break that conversation permanently, so only the folder can be opened.',
+        deleteFailed: 'Delete failed',
+        deleted: 'Deleted {name}',
+        revealMissing: 'The file is no longer at that location',
+        revealFailed: 'Could not open it',
       },
     };
 
@@ -144,12 +217,57 @@ window.__ModuleLoader__.load({
       '@keyframes dsh-find-spin{to{transform:rotate(360deg)}}',
       `.${FLASH_CLASS}{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px;border-radius:8px;transition:outline-color .4s ease;animation:dsh-find-pulse 1.4s ease-out 2;}`,
       '@keyframes dsh-find-pulse{0%{outline-offset:3px;}50%{outline-offset:7px;}100%{outline-offset:3px;}}',
+      '.dsh-find-tabs{flex:none;display:flex;align-items:flex-end;gap:4px;padding:8px 12px 0;border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
+      '.dsh-find-tab{appearance:none;border:0;background:transparent;font-family:inherit;font-size:12.5px;font-weight:500;color:var(--dsw-alias-label-secondary);padding:7px 16px 8px;border-radius:8px 8px 0 0;cursor:pointer;transition:background .12s ease,color .12s ease;}',
+      '.dsh-find-tab:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
+      '.dsh-find-tab[data-active="true"]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-weight:600;box-shadow:inset 0 -2px 0 var(--dsw-alias-brand-primary);}',
+      '.dsh-find-media-summary{flex:1 1 auto;min-width:0;font-size:12.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '.dsh-find-refresh{flex:none;height:26px;padding:0 12px;border:0.5px solid var(--dsw-alias-border-l1);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;cursor:pointer;}',
+      '.dsh-find-refresh:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-refresh:disabled{opacity:.5;cursor:default;}',
+      '.dsh-find-media-body{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 0 12px;}',
+      '.dsh-find-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(124px,1fr));gap:8px;padding:10px 12px 12px;}',
+      '.dsh-find-tile{position:relative;display:block;aspect-ratio:4/3;border-radius:9px;overflow:hidden;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l1);cursor:pointer;transition:transform .12s ease,box-shadow .12s ease;}',
+      '.dsh-find-tile:hover{transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.14);}',
+      '.dsh-find-tile[data-archived="true"]{opacity:.7;}',
+      '.dsh-find-thumb{width:100%;height:100%;object-fit:cover;display:block;background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-tile-badge{position:absolute;top:6px;left:6px;font-size:10.5px;font-weight:600;line-height:1.5;padding:0 6px;border-radius:999px;border:0.5px solid transparent;background:rgba(255,255,255,.86);color:#1f2328;}',
+      '.dsh-find-tile-badge[data-speaker="user"]{border-color:rgba(59,130,246,.45);color:#2563eb;}',
+      '.dsh-find-tile-badge[data-speaker="assistant"]{border-color:rgba(13,159,116,.45);color:#0d9f74;}',
+      '.dsh-find-tile-archived{position:absolute;top:6px;right:6px;font-size:10.5px;font-weight:600;line-height:1.5;padding:0 6px;border-radius:999px;border:0.5px solid rgba(229,72,77,.45);background:rgba(255,255,255,.9);color:#e5484d;}',
+      '.dsh-find-tile-kind{position:absolute;bottom:22px;right:6px;font-size:10px;font-weight:600;line-height:1.5;padding:0 6px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff;}',
+      '.dsh-find-tile-name{position:absolute;left:0;right:0;bottom:0;padding:14px 7px 5px;font-size:10.5px;line-height:1.35;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.72));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '.dsh-find-ws-head{cursor:pointer;user-select:none;}',
+      '.dsh-find-ws-head:hover{background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-ws-caret{flex:none;width:12px;font-size:10px;color:var(--dsw-alias-label-tertiary);}',
+      '.dsh-find-ws-body{padding:2px 0 6px;}',
+      '.dsh-find-session-block{border-top:0.5px solid var(--dsw-alias-border-l1);}',
+      '.dsh-find-session-block:first-child{border-top:none;}',
+      '.dsh-find-session-row{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;}',
+      '.dsh-find-session-caret{flex:none;width:12px;font-size:10px;color:var(--dsw-alias-label-tertiary);}',
+      '.dsh-find-session-row:hover{background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-session-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary);}',
+      '.dsh-find-session-title[data-archived="true"]{color:var(--dsw-alias-label-tertiary);}',
+      '.dsh-find-session-state{flex:none;font-size:11.5px;color:var(--dsw-alias-label-tertiary);}',
+      '.dsh-find-session-state[data-status="ready"]{color:var(--dsw-alias-label-secondary);}',
+      '.dsh-find-session-state[data-status="error"]{color:#e5484d;}',
+      '.dsh-find-preview{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:28px;background:rgba(0,0,0,.76);cursor:zoom-out;}',
+      '.dsh-find-preview-media{max-width:92vw;max-height:82vh;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.45);cursor:default;background:#000;}',
+      '.dsh-find-preview-caption{position:absolute;bottom:18px;left:0;right:0;text-align:center;font-size:12px;color:rgba(255,255,255,.86);}',
+      '.dsh-find-menu-layer{position:fixed;inset:0;z-index:1200;}',
+      '.dsh-find-menu{position:fixed;z-index:1201;min-width:190px;max-width:260px;padding:4px;display:flex;flex-direction:column;border-radius:9px;border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-overlay);box-shadow:0 12px 32px rgba(0,0,0,.22);box-sizing:border-box;}',
+      '.dsh-find-menu-item{appearance:none;border:none;background:transparent;text-align:left;font-family:inherit;font-size:12.5px;line-height:1.4;padding:7px 10px;border-radius:6px;cursor:pointer;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '.dsh-find-menu-item:hover{background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-menu-danger{color:#e5484d;font-weight:600;}',
+      '.dsh-find-menu-danger:hover{background:rgba(229,72,77,.10);}',
+      '.dsh-find-menu-error{padding:6px 10px 7px;font-size:11.5px;line-height:1.5;color:#e5484d;white-space:normal;}',
     ].join('');
 
     /* -------------------------------------------------------------- store */
 
     let store = {
       open: false,
+      tab: 'text',
       query: '',
       searched: '',
       loading: false,
@@ -157,6 +275,15 @@ window.__ModuleLoader__.load({
       payload: null,
       hideArchived: false,
       speakers: { user: true, assistant: true, tool: true, system: true },
+      mediaTree: null,
+      mediaTreeLoading: false,
+      mediaTreeError: '',
+      expanding: false,
+      expanded: {},
+      sessionMedia: {},
+      mediaSpeakers: { user: true, assistant: true },
+      preview: null,
+      menu: null,
       notice: '',
     };
     const listeners = new Set();
@@ -375,12 +502,341 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /* -------------------------------------------------------------- media */
+
+    /**
+     * The media tab is a separate scan: it asks the Host which pictures and
+     * clips live in each conversation. The result is cached in the store, so
+     * flipping tabs does not re-walk every session log.
+     */
+    function switchTab(tab) {
+      if (tab !== 'text' && tab !== 'media') return;
+      setStore({ tab, preview: null, menu: null });
+      if (tab === 'media' && store.mediaTree === null && !store.mediaTreeLoading) void loadMediaTree();
+    }
+
+    function toggleMediaSpeaker(key) {
+      const next = Object.assign({}, store.mediaSpeakers || {});
+      next[key] = next[key] !== true;
+      setStore({ mediaSpeakers: next });
+    }
+
+    /**
+     * The outline is cheap: workspaces and their conversation titles, no session
+     * log is read. Reading media stays an explicit action per conversation, so
+     * opening the tab never stalls the page.
+     */
+    async function loadMediaTree(force) {
+      if (store.mediaTreeLoading) return;
+      if (!force && store.mediaTree !== null) return;
+      setStore({ mediaTreeLoading: true, mediaTreeError: '' });
+      try {
+        const response = await fetch(ROUTE + '/media/tree', { headers: { accept: 'application/json' } });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
+        }
+        const payload = await response.json();
+        setStore({ mediaTree: payload, mediaTreeLoading: false, mediaTreeError: '' });
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        setStore({
+          mediaTree: null,
+          mediaTreeLoading: false,
+          mediaTreeError: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    function workspaceKey(workspace) {
+      return workspace.workspaceId === null || workspace.workspaceId === undefined
+        ? '__unowned__'
+        : String(workspace.workspaceId);
+    }
+
+    function toggleWorkspace(workspace) {
+      const key = workspaceKey(workspace);
+      const next = Object.assign({}, store.expanded || {});
+      if (next[key] === true) delete next[key];
+      else next[key] = true;
+      setStore({ expanded: next });
+    }
+
+    function setWorkspaceExpanded(keys, value) {
+      const next = Object.assign({}, store.expanded || {});
+      for (const key of keys) {
+        if (value) next[key] = true;
+        else delete next[key];
+      }
+      setStore({ expanded: next });
+    }
+
+    /* --------------------------------------------------- media row menu */
+
+    function openMediaMenu(item, event) {
+      if (!item) return;
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      const width = 210;
+      const height = 168;
+      const left = Math.min(Math.max(8, event.clientX), Math.max(8, window.innerWidth - width - 8));
+      const top = Math.min(Math.max(8, event.clientY), Math.max(8, window.innerHeight - height - 8));
+      setStore({ menu: { item, x: left, y: top, confirming: false, error: '' } });
+    }
+
+    function closeMediaMenu() {
+      if (store.menu !== null) setStore({ menu: null });
+    }
+
+    function patchMenu(patch) {
+      const menu = store.menu;
+      if (menu === null) return;
+      setStore({ menu: Object.assign({}, menu, patch) });
+    }
+
+    function flashNotice(text) {
+      setStore({ notice: text });
+      window.setTimeout(() => {
+        if (store.notice === text) setStore({ notice: '' });
+      }, 6000);
+    }
+
+    /** Removes one item from the loaded grid without re-reading the session. */
+    function dropMedia(item) {
+      const sessions = Object.assign({}, store.sessionMedia || {});
+      const entry = sessions[item.sessionId];
+      if (entry === undefined) return;
+      const items = (entry.items || []).filter((each) => each.id !== item.id);
+      sessions[item.sessionId] = Object.assign({}, entry, {
+        items,
+        counts: {
+          user: items.filter((each) => each.speaker === 'user').length,
+          assistant: items.filter((each) => each.speaker !== 'user').length,
+          image: items.filter((each) => each.kind === 'image').length,
+          video: items.filter((each) => each.kind === 'video').length,
+        },
+      });
+      setStore({ sessionMedia: sessions });
+    }
+
+    async function revealMedia(item) {
+      const tr = makeT();
+      try {
+        const response = await fetch(ROUTE + '/media/reveal?id=' + encodeURIComponent(item.id), {
+          headers: { accept: 'application/json' },
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          const code = payload && payload.error ? payload.error : '';
+          patchMenu({ error: code === 'not-found' ? tr('revealMissing') : tr('revealFailed') });
+          return;
+        }
+        closeMediaMenu();
+      } catch (err) {
+        patchMenu({ error: tr('revealFailed') });
+      }
+    }
+
+    async function deleteMedia(item) {
+      const tr = makeT();
+      try {
+        const response = await fetch(ROUTE + '/media/delete?id=' + encodeURIComponent(item.id), {
+          method: 'POST',
+          headers: { accept: 'application/json' },
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          const code = payload && payload.error ? payload.error : '';
+          patchMenu({ error: code === 'attachment-protected' ? tr('deleteProtected') : tr('deleteFailed') });
+          return;
+        }
+        closeMediaMenu();
+        dropMedia(item);
+        flashNotice(tr('deleted', { name: item.name }));
+      } catch (err) {
+        patchMenu({ error: tr('deleteFailed') });
+      }
+    }
+
+    function confirmDelete(menu) {
+      if (menu === null) return;
+      const tr = makeT();
+      if (menu.item && menu.item.source === 'attachment') {
+        patchMenu({ error: tr('deleteProtected') });
+        return;
+      }
+      if (menu.confirming === true) {
+        void deleteMedia(menu.item);
+        return;
+      }
+      patchMenu({ confirming: true, error: '' });
+    }
+
+    /**
+     * Copies one media file wherever the user points. The save picker has to be
+     * opened on the click itself (transient activation), so it runs before the
+     * download; browsers without it fall back to a normal download.
+     */
+    async function saveMediaAs(item) {
+      const tr = makeT();
+      const fallbackName = item.kind === 'video' ? 'media.mp4' : item.kind === 'image' ? 'media.png' : 'media.bin';
+      const name = typeof item.name === 'string' && item.name.length > 0 ? item.name : fallbackName;
+      let handle = null;
+      if (typeof window.showSaveFilePicker === 'function') {
+        try {
+          handle = await window.showSaveFilePicker({ suggestedName: name });
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+          handle = null;
+        }
+      }
+      try {
+        const response = await fetch(item.url);
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const blob = await response.blob();
+        if (handle !== null) {
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        } else {
+          const objectUrl = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = objectUrl;
+          anchor.download = name;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(objectUrl), 4000);
+        }
+        closeMediaMenu();
+        flashNotice(handle !== null ? tr('savedAs', { name }) : tr('savedDownload', { name }));
+      } catch (err) {
+        patchMenu({ error: tr('saveFailed') });
+      }
+    }
+
+    function patchSession(sessionId, patch) {
+      const next = Object.assign({}, store.sessionMedia || {});
+      next[sessionId] = Object.assign({}, next[sessionId] || {}, patch);
+      setStore({ sessionMedia: next });
+    }
+
+    /**
+     * Folds every workspace and every conversation that was already read.
+     * The loaded items stay in memory, so unfolding is instant.
+     */
+    function collapseAll() {
+      const current = store.sessionMedia || {};
+      const next = {};
+      for (const id of Object.keys(current)) {
+        next[id] = Object.assign({}, current[id], { open: false });
+      }
+      setStore({ sessionMedia: next, expanded: {}, preview: null, menu: null });
+    }
+
+    /** Reads exactly one conversation's media — the click that follows. */
+    async function loadSessionMedia(sessionId, force) {
+      const current = (store.sessionMedia || {})[sessionId];
+      if (current !== undefined && current.status === 'loading') return;
+      if (!force && current !== undefined && current.status === 'ready') return;
+      patchSession(sessionId, { status: 'loading', error: '' });
+      try {
+        const response = await fetch(ROUTE + '/media/session?id=' + encodeURIComponent(sessionId), {
+          headers: { accept: 'application/json' },
+        });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
+        }
+        const payload = await response.json();
+        patchSession(sessionId, {
+          status: 'ready',
+          items: Array.isArray(payload.items) ? payload.items : [],
+          counts: payload.counts || { user: 0, assistant: 0, image: 0, video: 0 },
+          tookMs: payload.tookMs || 0,
+          error: '',
+        });
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        patchSession(sessionId, { status: 'error', error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    /**
+     * Clicking a conversation row either reads it for the first time or folds /
+     * unfolds the grid it already produced. Nothing is re-read on a fold.
+     */
+    function toggleSessionMedia(sessionId) {
+      const entry = (store.sessionMedia || {})[sessionId];
+      if (entry === undefined || entry.status === 'error') {
+        void loadSessionMedia(sessionId, entry !== undefined);
+        return;
+      }
+      if (entry.status !== 'ready') return;
+      patchSession(sessionId, { open: entry.open === false });
+    }
+
+    /**
+     * "Expand all" is the old behaviour: one full scan, then every conversation
+     * is filled from the result. It stays opt-in because it reads every log.
+     */
+    async function expandAll() {
+      if (store.mediaTree === null) void loadMediaTree();
+      if (store.expanding === true) return;
+      setStore({ expanding: true });
+      try {
+        const response = await fetch(ROUTE + '/media?total=' + String(MEDIA_TOTAL), {
+          headers: { accept: 'application/json' },
+        });
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
+        }
+        const payload = await response.json();
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const grouped = new Map();
+        for (const item of items) {
+          const list = grouped.get(item.sessionId);
+          if (list === undefined) grouped.set(item.sessionId, [item]);
+          else list.push(item);
+        }
+        const sessions = {};
+        for (const [sessionId, list] of grouped) {
+          sessions[sessionId] = {
+            status: 'ready',
+            items: list,
+            counts: {
+              user: list.filter((item) => item.speaker === 'user').length,
+              assistant: list.filter((item) => item.speaker !== 'user').length,
+              image: list.filter((item) => item.kind === 'image').length,
+              video: list.filter((item) => item.kind === 'video').length,
+            },
+            tookMs: payload.tookMs || 0,
+            error: '',
+          };
+        }
+        const expanded = {};
+        for (const workspace of (store.mediaTree && store.mediaTree.workspaces) || []) {
+          expanded[workspaceKey(workspace)] = true;
+          for (const session of workspace.sessions) {
+            if (sessions[session.sessionId] === undefined) {
+              sessions[session.sessionId] = { status: 'ready', items: [], counts: { user: 0, assistant: 0, image: 0, video: 0 }, tookMs: 0, error: '' };
+            }
+          }
+        }
+        setStore({ sessionMedia: sessions, expanded, expanding: false, mediaTotals: payload });
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        setStore({ expanding: false, mediaTreeError: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
     /* ------------------------------------------------------------ palette */
 
     function openPalette() {
       const selection = readSelectionText();
       const query = selection !== null ? selection : store.query;
-      setStore({ open: true, notice: '' });
+      setStore({ open: true, tab: 'text', notice: '', preview: null, menu: null });
       if (selection !== null && selection !== store.query) {
         setStore({ query: selection });
         scheduleSearch(selection);
@@ -389,7 +845,7 @@ window.__ModuleLoader__.load({
 
     function openPaletteWith(query) {
       cancelSearch();
-      setStore({ open: true, query, notice: '' });
+      setStore({ open: true, tab: 'text', query, notice: '', preview: null, menu: null });
       scheduleSearch(query);
     }
 
@@ -442,7 +898,7 @@ window.__ModuleLoader__.load({
 
     function closePalette() {
       cancelSearch();
-      setStore({ open: false, notice: '' });
+      setStore({ open: false, notice: '', preview: null, menu: null });
     }
 
     function readSelectionText() {
@@ -577,6 +1033,21 @@ window.__ModuleLoader__.load({
       }, [state.open]);
 
       const payload = state.payload;
+      const tab = state.tab === 'media' ? 'media' : 'text';
+      const mediaTree = state.mediaTree;
+      const mediaWorkspaces = mediaTree !== null && Array.isArray(mediaTree.workspaces) ? mediaTree.workspaces : [];
+      const mediaSpeakers = state.mediaSpeakers || {};
+      const expandedMap = state.expanded || {};
+      const sessionMedia = state.sessionMedia || {};
+      const mediaSpeakerOf = (item) => (item.speaker === 'user' ? 'user' : 'assistant');
+      const shownMediaOf = (sessionId) => {
+        const entry = sessionMedia[sessionId];
+        if (entry === undefined || entry.status !== 'ready') return [];
+        const kept = (entry.items || []).filter((item) => mediaSpeakers[mediaSpeakerOf(item)] !== false);
+        return state.hideArchived === true ? kept.filter((item) => item.archived !== true) : kept;
+      };
+      const loadedSessions = Object.keys(sessionMedia).filter((id) => sessionMedia[id] && sessionMedia[id].status === 'ready');
+      const loadedMediaCount = loadedSessions.reduce((total, id) => total + shownMediaOf(id).length, 0);
       const loaded = state.open ? flattenHits(payload) : [];
       /* Archived conversations stay searchable; the toggle only hides them from
          the two panes, it never changes what the Host scanned. */
@@ -732,6 +1203,416 @@ window.__ModuleLoader__.load({
         );
       };
 
+      const renderTabs = () =>
+        h(
+          'div',
+          { className: 'dsh-find-tabs', role: 'tablist' },
+          [
+            { key: 'text', labelKey: 'tabText' },
+            { key: 'media', labelKey: 'tabMedia' },
+          ].map((entry) =>
+            h(
+              'button',
+              {
+                key: entry.key,
+                type: 'button',
+                role: 'tab',
+                className: 'dsh-find-tab',
+                'data-active': tab === entry.key ? 'true' : 'false',
+                'aria-selected': tab === entry.key ? 'true' : 'false',
+                onClick: () => switchTab(entry.key),
+              },
+              t(entry.labelKey),
+            ),
+          ),
+        );
+
+      const renderMediaChips = () =>
+        h(
+          'div',
+          { className: 'dsh-find-chips' },
+          ['user', 'assistant'].map((key) =>
+            h(
+              'button',
+              {
+                key,
+                type: 'button',
+                className: 'dsh-find-chip',
+                'data-speaker': key,
+                'data-on': mediaSpeakers[key] === true ? 'true' : 'false',
+                title: t(SPEAKER_LABELS[key]),
+                onClick: () => toggleMediaSpeaker(key),
+              },
+              t(SPEAKER_LABELS[key]),
+            ),
+          ),
+        );
+
+      const renderMediaHead = () => {
+        const totalSessions = mediaWorkspaces.reduce((total, workspace) => total + workspace.sessions.length, 0);
+        return h(
+          'div',
+          { className: 'dsh-find-head' },
+          h(
+            'span',
+            { className: 'dsh-find-icon', 'aria-hidden': 'true' },
+            h(
+              'svg',
+              {
+                width: 16,
+                height: 16,
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              },
+              h('rect', { x: 3, y: 4, width: 18, height: 16, rx: 2 }),
+              h('circle', { cx: 8.5, cy: 9.5, r: 1.6 }),
+              h('path', { d: 'M21 15.5 16 10.5 9 17.5' }),
+            ),
+          ),
+          h(
+            'span',
+            { className: 'dsh-find-media-summary' },
+            mediaTree === null
+              ? ''
+              : t('mediaOutline', {
+                  workspaces: mediaWorkspaces.length,
+                  sessions: totalSessions,
+                  loaded: loadedMediaCount,
+                }),
+          ),
+          renderMediaChips(),
+          h(
+            'label',
+            { className: 'dsh-find-toggle', title: t('hideArchivedHint') },
+            h('input', {
+              type: 'checkbox',
+              checked: state.hideArchived === true,
+              onChange: (event) => setStore({ hideArchived: event.target.checked }),
+            }),
+            h('span', null, t('hideArchived')),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-find-refresh',
+              title: t('mediaExpandAllHint'),
+              onClick: () => void expandAll(),
+              disabled: state.expanding === true,
+            },
+            state.expanding === true ? t('mediaExpanding') : t('mediaExpandAll'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-find-refresh',
+              title: t('mediaCollapseAllHint'),
+              onClick: () => collapseAll(),
+              disabled: Object.keys(expandedMap).length === 0 && Object.keys(sessionMedia).length === 0,
+            },
+            t('mediaCollapseAll'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-find-refresh',
+              title: t('mediaRefreshHint'),
+              onClick: () => {
+                setStore({ sessionMedia: {}, expanded: {}, preview: null, menu: null });
+                void loadMediaTree(true);
+              },
+              disabled: state.mediaTreeLoading === true,
+            },
+            t('mediaRefresh'),
+          ),
+        );
+      };
+
+      const renderTile = (item) =>
+        h(
+          'div',
+          {
+            key: item.id,
+            className: 'dsh-find-tile',
+            title: item.name,
+            'data-archived': item.archived === true ? 'true' : 'false',
+            onClick: () => setStore({ preview: item }),
+            onContextMenu: (event) => openMediaMenu(item, event),
+          },
+          item.kind === 'video'
+            ? h('video', { className: 'dsh-find-thumb', src: item.url, preload: 'metadata' })
+            : h('img', { className: 'dsh-find-thumb', src: item.url, loading: 'lazy', alt: item.name }),
+          h(
+            'span',
+            { className: 'dsh-find-tile-badge', 'data-speaker': mediaSpeakerOf(item) },
+            t(mediaSpeakerOf(item) === 'user' ? 'speakerUser' : 'speakerAssistant'),
+          ),
+          item.archived === true
+            ? h('span', { className: 'dsh-find-tile-archived', key: 'a' }, t('archivedBadge'))
+            : null,
+          item.kind === 'video'
+            ? h('span', { className: 'dsh-find-tile-kind', key: 'v' }, t('mediaVideo'))
+            : null,
+          h('span', { className: 'dsh-find-tile-name' }, item.name),
+        );
+
+      const renderSessionRow = (workspace, session) => {
+        const entry = sessionMedia[session.sessionId];
+        const status = entry === undefined ? 'idle' : entry.status;
+        const shown = shownMediaOf(session.sessionId);
+        const open = entry !== undefined && entry.open === false ? false : true;
+        const foldable = status === 'ready' && shown.length > 0;
+        const stateText =
+          status === 'loading'
+            ? t('mediaReading')
+            : status === 'error'
+              ? t('mediaReadFailed')
+              : status === 'ready'
+                ? shown.length === 0
+                  ? t('mediaNone')
+                  : t('mediaCount', { count: shown.length })
+                : '';
+        return h(
+          'div',
+          { key: 's:' + session.sessionId, className: 'dsh-find-session-block' },
+          h(
+            'div',
+            {
+              className: 'dsh-find-session-row',
+              'data-open': foldable && open ? 'true' : 'false',
+              onClick: () => toggleSessionMedia(session.sessionId),
+              title: session.cwd || session.sessionId,
+            },
+            h(
+              'span',
+              { className: 'dsh-find-session-caret', 'aria-hidden': 'true' },
+              foldable ? (open ? '▾' : '▸') : '·',
+            ),
+            h(
+              'span',
+              { className: 'dsh-find-session-title', 'data-archived': session.archived === true ? 'true' : 'false' },
+              session.title || session.sessionId,
+            ),
+            session.archived === true
+              ? h('span', { className: 'dsh-find-archived', key: 'a' }, t('archivedBadge'))
+              : null,
+            status === 'loading'
+              ? h('span', { className: 'dsh-find-spinner', key: 'sp' })
+              : null,
+            h(
+              'span',
+              { className: 'dsh-find-session-state', 'data-status': status },
+              stateText,
+            ),
+          ),
+          status === 'error' && entry && entry.error
+            ? h('div', { className: 'dsh-find-menu-error' }, entry.error)
+            : null,
+          shown.length > 0 && open
+            ? h('div', { className: 'dsh-find-media-grid' }, shown.map(renderTile))
+            : null,
+        );
+      };
+
+      const renderMediaBody = () => {
+        if (state.mediaTreeError) {
+          return h(
+            'div',
+            { className: 'dsh-find-body' },
+            h('div', { className: 'dsh-find-error' }, t('failed', { message: state.mediaTreeError })),
+          );
+        }
+        if (state.mediaTreeLoading && mediaTree === null) {
+          return h(
+            'div',
+            { className: 'dsh-find-body' },
+            h('div', { className: 'dsh-find-hint' }, h('span', { className: 'dsh-find-spinner' }), t('mediaTreeLoading')),
+          );
+        }
+        if (mediaWorkspaces.length === 0) {
+          return h('div', { className: 'dsh-find-body' }, h('div', { className: 'dsh-find-hint' }, t('mediaEmpty')));
+        }
+        return h(
+          'div',
+          { className: 'dsh-find-media-body' },
+          mediaWorkspaces.map((workspace) => {
+            const key = workspaceKey(workspace);
+            const isOpen = expandedMap[key] === true;
+            const sessions = workspace.sessions.filter(
+              (session) => state.hideArchived !== true || session.archived !== true,
+            );
+            const loadedHere = sessions.reduce((total, session) => total + shownMediaOf(session.sessionId).length, 0);
+            return h(
+              'div',
+              { key: 'mc:' + key, className: 'dsh-find-card' },
+              h(
+                'div',
+                {
+                  className: 'dsh-find-card-head dsh-find-ws-head',
+                  'data-open': isOpen ? 'true' : 'false',
+                  title: workspace.workspacePath || workspace.workspaceTitle,
+                  onClick: () => toggleWorkspace(workspace),
+                },
+                h(
+                  'span',
+                  { className: 'dsh-find-ws-caret', 'aria-hidden': 'true' },
+                  isOpen ? '▾' : '▸',
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-find-card-icon', 'aria-hidden': 'true' },
+                  h(
+                    'svg',
+                    {
+                      width: 13,
+                      height: 13,
+                      viewBox: '0 0 24 24',
+                      fill: 'none',
+                      stroke: 'currentColor',
+                      strokeWidth: 2,
+                      strokeLinecap: 'round',
+                      strokeLinejoin: 'round',
+                    },
+                    h('path', { d: 'M3 7.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' }),
+                  ),
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-find-card-title' },
+                  workspace.workspaceTitle || t('ungrouped'),
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-find-card-count' },
+                  loadedHere > 0
+                    ? t('mediaCountTwo', { count: loadedHere, sessions: sessions.length })
+                    : t('mediaSessionCount', { count: sessions.length }),
+                ),
+              ),
+              isOpen
+                ? h(
+                    'div',
+                    { className: 'dsh-find-ws-body' },
+                    sessions.length === 0
+                      ? h('div', { className: 'dsh-find-pane-empty' }, t('mediaNoSessions'))
+                      : sessions.map((session) => renderSessionRow(workspace, session)),
+                  )
+                : null,
+            );
+          }),
+        );
+      };
+
+      const renderFoot = () =>
+        h(
+          'div',
+          { className: 'dsh-find-foot' },
+          h(
+            'span',
+            { className: 'dsh-find-notice' },
+            state.notice ? state.notice : tab === 'media' ? t('mediaHint') : t('hint'),
+          ),
+          h(
+            'span',
+            { className: 'dsh-find-foot-right' },
+            tab === 'media'
+              ? loadedSessions.length > 0
+                ? t('mediaLoadedTotal', { count: loadedMediaCount, sessions: loadedSessions.length })
+                : ''
+
+              : payload !== null && payload.totalHits > 0
+                ? (payload.truncated ? t('truncated', { count: payload.totalHits }) + ' · ' : '') +
+                  t('elapsed', { ms: payload.tookMs })
+                : '',
+          ),
+        );
+
+      const renderPreview = () => {
+        const preview = state.preview;
+        if (preview === null) return null;
+        return h(
+          'div',
+          { key: 'preview', className: 'dsh-find-preview', onClick: () => setStore({ preview: null }) },
+          preview.kind === 'video'
+            ? h('video', {
+                className: 'dsh-find-preview-media',
+                src: preview.url,
+                controls: true,
+                autoPlay: true,
+                onClick: (event) => event.stopPropagation(),
+              })
+            : h('img', {
+                className: 'dsh-find-preview-media',
+                src: preview.url,
+                alt: preview.name,
+                onClick: (event) => event.stopPropagation(),
+              }),
+          h('div', { className: 'dsh-find-preview-caption' }, preview.name),
+        );
+      };
+
+      const renderMenu = () => {
+        const menu = state.menu;
+        if (menu === null) return null;
+        return h(
+          React.Fragment,
+          { key: 'menu-fragment' },
+          h('div', {
+            key: 'menu-layer',
+            className: 'dsh-find-menu-layer',
+            onMouseDown: () => closeMediaMenu(),
+            onContextMenu: (event) => {
+              event.preventDefault();
+              closeMediaMenu();
+            },
+          }),
+          h(
+            'div',
+            {
+              key: 'menu',
+              className: 'dsh-find-menu',
+              style: { left: menu.x + 'px', top: menu.y + 'px' },
+              onMouseDown: (event) => event.stopPropagation(),
+              onContextMenu: (event) => event.preventDefault(),
+            },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-find-menu-item',
+                onClick: () => void saveMediaAs(menu.item),
+              },
+              t('menuSaveAs'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-find-menu-item',
+                onClick: () => void revealMedia(menu.item),
+              },
+              t('menuReveal'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-find-menu-item dsh-find-menu-danger',
+                onClick: () => confirmDelete(menu),
+              },
+              menu.confirming === true ? t('menuDeleteConfirm') : t('menuDelete'),
+            ),
+            menu.error ? h('div', { className: 'dsh-find-menu-error' }, menu.error) : null,
+          ),
+        );
+      };
+
       let standalone = null;
       if (state.error) {
         standalone = h('div', { className: 'dsh-find-error' }, t('failed', { message: state.error }));
@@ -769,10 +1650,18 @@ window.__ModuleLoader__.load({
         if (event.key === 'Escape') {
           event.preventDefault();
           event.stopPropagation();
+          if (store.menu !== null) {
+            closeMediaMenu();
+            return;
+          }
+          if (store.preview !== null) {
+            setStore({ preview: null });
+            return;
+          }
           closePalette();
           return;
         }
-        if (event.key === 'Enter') {
+        if (event.key === 'Enter' && tab === 'text') {
           event.preventDefault();
           event.stopPropagation();
           submitSearch();
@@ -804,9 +1693,11 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'dsh-find-panel' },
-            h(
-              'div',
-              { className: 'dsh-find-head' },
+            renderTabs(),
+            tab === 'text'
+              ? h(
+                  'div',
+                  { className: 'dsh-find-head' },
               h(
                 'span',
                 { className: 'dsh-find-icon', 'aria-hidden': 'true' },
@@ -853,21 +1744,13 @@ window.__ModuleLoader__.load({
                   ? h(React.Fragment, null, h('span', { className: 'dsh-find-spinner' }), t('searching'))
                   : summary,
               ),
-            ),
-            body,
-            h(
-              'div',
-              { className: 'dsh-find-foot' },
-              h('span', { className: 'dsh-find-notice' }, state.notice ? state.notice : t('hint')),
-              h(
-                'span',
-                { className: 'dsh-find-foot-right' },
-                payload !== null && payload.totalHits > 0
-                  ? (payload.truncated ? t('truncated', { count: payload.totalHits }) + ' · ' : '') + t('elapsed', { ms: payload.tookMs })
-                  : '',
-              ),
-            ),
+                )
+              : renderMediaHead(),
+            tab === 'text' ? body : renderMediaBody(),
+            renderFoot(),
           ),
+          renderPreview(),
+          renderMenu(),
         ),
       );
     }

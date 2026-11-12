@@ -13,6 +13,11 @@
  * behaviour; it talks to this route with `fetch`.
  */
 
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import { extname, join } from 'node:path';
+
 const ROUTE_PREFIX = '/dsh-find';
 
 const DEFAULTS = {
@@ -503,6 +508,677 @@ function registerFindCommand(ctx) {
   attach(ctx, typeof ctx.get === 'function' ? ctx.get('commands') : ctx.commands);
 }
 
+/* ------------------------------------------------------------------ media */
+
+/**
+ * The media tab answers a different question than search: which pictures and
+ * clips live in this conversation, and did the user supply them or did the
+ * assistant produce them.
+ *
+ * Attachments arrive as `image` blocks that point at a content-addressed object
+ * under `$DSH_HOME/attachments/v1/objects`. Videos never become blocks — they
+ * only appear as local paths inside message text.
+ */
+const MEDIA_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/mp4',
+  '.mkv': 'video/x-matroska',
+  '.avi': 'video/x-msvideo',
+};
+
+const MEDIA_DEFAULTS = { total: 400, concurrency: 6, maxBytes: 600 * 1024 * 1024 };
+const ATTACHMENT_OBJECTS = ['attachments', 'v1', 'objects'];
+
+/* A Windows absolute path ending in a media extension. Paths usually arrive
+   markdown-escaped (`E:////dir////clip.mp4`), so separator runs collapse. The
+   lookbehind rejects URL fragments such as `https:/host/a.png`, whose `s:` is
+   not a drive letter. */
+const MEDIA_PATH_RE =
+  /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"'`<>|?*()[\]{}\u0000-\u001f，。；：、（）【】《》]*?\.(?:png|jpe?g|webp|gif|bmp|mp4|webm|mov|m4v|mkv|avi)/gi;
+
+function isVideoType(mediaType) {
+  return typeof mediaType === 'string' && mediaType.startsWith('video/');
+}
+
+function cleanMediaPath(raw) {
+  return raw.replace(/[\\/]{2,}/g, '/').replace(/[.,;:]+$/, '');
+}
+
+function dshHome() {
+  const fromEnv = process.env.DSH_HOME;
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv;
+  return join(os.homedir(), '.dsh');
+}
+
+function mediaFromAttachment(block) {
+  const attachment = block === null || typeof block !== 'object' ? null : block.attachment;
+  if (attachment === null || typeof attachment !== 'object') return null;
+  const rawId = typeof attachment.attachmentId === 'string' ? attachment.attachmentId : '';
+  const hex = (rawId.startsWith('sha256:') ? rawId.slice(7) : rawId).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hex)) return null;
+  const mediaType = typeof attachment.mediaType === 'string' ? attachment.mediaType : '';
+  const name =
+    typeof attachment.name === 'string' && attachment.name.length > 0 ? attachment.name : hex.slice(0, 12);
+  return {
+    id: 'att:' + hex,
+    source: 'attachment',
+    kind: isVideoType(mediaType) ? 'video' : 'image',
+    name,
+    mediaType,
+    bytes: Number.isFinite(attachment.bytes) ? attachment.bytes : null,
+    width: Number.isFinite(attachment.width) ? attachment.width : null,
+    height: Number.isFinite(attachment.height) ? attachment.height : null,
+    url: ROUTE_PREFIX + '/media/attachment?sha=' + hex,
+  };
+}
+
+function mediaFromPath(raw) {
+  const target = cleanMediaPath(raw);
+  if (!/^[A-Za-z]:\//.test(target)) return null;
+  const mediaType = MEDIA_TYPES[extname(target).toLowerCase()];
+  if (mediaType === undefined) return null;
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch (err) {
+    return null;
+  }
+  if (!stat.isFile() || stat.size > MEDIA_DEFAULTS.maxBytes) return null;
+  const segments = target.split('/');
+  return {
+    id: 'file:' + target,
+    source: 'file',
+    kind: isVideoType(mediaType) ? 'video' : 'image',
+    name: segments[segments.length - 1] ?? target,
+    path: target,
+    mediaType,
+    bytes: stat.size,
+    width: null,
+    height: null,
+    url: ROUTE_PREFIX + '/media/file?path=' + encodeURIComponent(target),
+  };
+}
+
+/* The Client may only act on media it was actually shown, so every served item
+   is remembered by id. Absolute paths never travel back from the browser — the
+   reveal/delete routes resolve the id here instead. */
+const mediaIndex = new Map();
+
+function rememberMedia(item) {
+  if (item === null || typeof item !== 'object' || typeof item.id !== 'string') return;
+  if (item.source === 'attachment') {
+    mediaIndex.set(item.id, { source: 'attachment', hex: item.id.slice(4) });
+    return;
+  }
+  if (item.source === 'file' && typeof item.path === 'string') {
+    mediaIndex.set(item.id, { source: 'file', path: item.path });
+  }
+}
+
+function revealInExplorer(target, select) {
+  const args = select ? [`/select,${target}`] : [target];
+  const child = spawn('explorer.exe', args, { detached: true, stdio: 'ignore' });
+  child.on('error', () => {
+    /* Explorer is missing or refused; nothing else to do. */
+  });
+  child.unref();
+}
+
+function contentBlocksOf(event) {
+  const data = event === null || typeof event !== 'object' ? null : event.data;
+  if (data === null || typeof data !== 'object') return null;
+  if (Array.isArray(data.content)) return data.content;
+  const message = data.message;
+  if (message !== null && typeof message === 'object' && Array.isArray(message.content)) {
+    return message.content;
+  }
+  return null;
+}
+
+async function runMedia(ctx, options, signal) {
+  const sessionQuery = ctx.get('sessionQuery');
+  const registry = ctx.get('workspaceRegistry');
+  if (sessionQuery === undefined || sessionQuery === null) {
+    throw new Error('sessionQuery service is unavailable');
+  }
+
+  const startedAt = Date.now();
+
+  const workspaces = (() => {
+    try {
+      return registry === undefined || registry === null ? [] : registry.list();
+    } catch (err) {
+      return [];
+    }
+  })();
+
+  const workspaceByPath = new Map();
+  const workspaceOrder = new Map();
+  workspaces.forEach((workspace, index) => {
+    const key = normalizePath(workspace.path);
+    if (key.length > 0) workspaceByPath.set(key, workspace);
+    workspaceOrder.set(workspace.id, index);
+  });
+
+  const archivedIds = (() => {
+    try {
+      const ids = registry?.archivedSessionIds;
+      if (ids === undefined || ids === null) return new Set();
+      return new Set(Array.from(ids, (id) => String(id)));
+    } catch (err) {
+      return new Set();
+    }
+  })();
+
+  const records = await sessionQuery.listSessions(signal);
+  const targets = records.filter((record) => {
+    const header = record.header;
+    if (header === undefined || typeof header.id !== 'string') return false;
+    if (header.origin === 'subagent') return false;
+    return true;
+  });
+
+  const scanned = await mapLimit(targets, options.concurrency, async (record) => {
+    if (signal?.aborted) return null;
+
+    let events;
+    try {
+      const snapshot = await sessionQuery.readSession(record.header.id);
+      events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+    } catch (err) {
+      return null;
+    }
+
+    const items = new Map();
+
+    for (const event of events) {
+      if (event === null || typeof event !== 'object') continue;
+      if (!SEARCHABLE_EVENT_TYPES.includes(event.type)) continue;
+      const blocks = contentBlocksOf(event);
+      if (blocks === null) continue;
+      const speaker = speakerOf(event.type, event.data) === 'user' ? 'user' : 'assistant';
+
+      for (const block of blocks) {
+        if (block === null || typeof block !== 'object') continue;
+
+        if (block.type === 'image') {
+          const item = mediaFromAttachment(block);
+          if (item === null) continue;
+          const existing = items.get(item.id);
+          if (existing !== undefined) {
+            if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
+            continue;
+          }
+          items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
+          continue;
+        }
+
+        /* Path mentions count for every message kind — a tool result is where
+           most produced videos and screenshots get reported. */
+        if (block.type !== 'text' || typeof block.text !== 'string') continue;
+        const matches = block.text.match(MEDIA_PATH_RE);
+        if (matches === null) continue;
+        for (const raw of matches) {
+          const item = mediaFromPath(raw);
+          if (item === null) continue;
+          const existing = items.get(item.id);
+          if (existing !== undefined) {
+            /* One file mentioned by both sides belongs to the human. */
+            if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
+            continue;
+          }
+          items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
+        }
+      }
+    }
+
+    if (items.size === 0) return null;
+    return { record, items: Array.from(items.values()) };
+  });
+
+  const matched = scanned.filter((entry) => entry !== null);
+
+  try {
+    const observations = await sessionQuery.readTitleSnapshots(
+      matched.map((entry) => entry.record.header.id),
+      signal,
+    );
+    const titles = new Map();
+    for (const observation of observations) {
+      if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
+        titles.set(observation.sessionId, observation.value.title.title);
+      }
+    }
+    for (const entry of matched) {
+      const title = titles.get(entry.record.header.id);
+      if (typeof title === 'string' && title.length > 0) entry.title = title;
+    }
+  } catch (err) {
+    /* titles are a nicety */
+  }
+
+  matched.sort((left, right) => {
+    const leftArchived = archivedIds.has(String(left.record.header.id)) ? 1 : 0;
+    const rightArchived = archivedIds.has(String(right.record.header.id)) ? 1 : 0;
+    if (leftArchived !== rightArchived) return leftArchived - rightArchived;
+    const leftWorkspace = workspaceByPath.get(normalizePath(left.record.header.cwd)) ?? null;
+    const rightWorkspace = workspaceByPath.get(normalizePath(right.record.header.cwd)) ?? null;
+    const leftOrder =
+      leftWorkspace === null
+        ? Number.MAX_SAFE_INTEGER
+        : (workspaceOrder.get(leftWorkspace.id) ?? Number.MAX_SAFE_INTEGER);
+    const rightOrder =
+      rightWorkspace === null
+        ? Number.MAX_SAFE_INTEGER
+        : (workspaceOrder.get(rightWorkspace.id) ?? Number.MAX_SAFE_INTEGER);
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return (right.record.header.createdAt ?? 0) - (left.record.header.createdAt ?? 0);
+  });
+
+  const items = [];
+  for (const entry of matched) {
+    const header = entry.record.header;
+    const workspace = workspaceByPath.get(normalizePath(header.cwd)) ?? null;
+    for (const item of entry.items) {
+      items.push({
+        sessionId: header.id,
+        title: entry.title ?? null,
+        workspaceId: workspace === null ? null : workspace.id,
+        workspaceTitle: workspace === null ? null : workspace.title,
+        workspacePath: workspace === null ? (header.cwd ?? null) : workspace.path,
+        cwd: header.cwd ?? null,
+        live: entry.record.live === true,
+        archived: archivedIds.has(String(header.id)),
+        createdAt: header.createdAt,
+        ...item,
+      });
+    }
+  }
+
+  const kept = items.slice(0, options.total);
+  for (const item of kept) rememberMedia(item);
+
+  return {
+    tookMs: Date.now() - startedAt,
+    sessionsScanned: targets.length,
+    sessionsMatched: matched.length,
+    total: kept.length,
+    truncated: items.length > kept.length,
+    counts: {
+      user: kept.reduce((total, item) => (item.speaker === 'user' ? total + 1 : total), 0),
+      assistant: kept.reduce((total, item) => (item.speaker === 'assistant' ? total + 1 : total), 0),
+      image: kept.reduce((total, item) => (item.kind === 'image' ? total + 1 : total), 0),
+      video: kept.reduce((total, item) => (item.kind === 'video' ? total + 1 : total), 0),
+    },
+    items: kept,
+  };
+}
+
+/* --- per-session media ---------------------------------------------------- */
+
+/** Shared lookups every media entry point needs. */
+function sessionLookup(ctx) {
+  const sessionQuery = ctx.get('sessionQuery');
+  const registry = ctx.get('workspaceRegistry');
+  if (sessionQuery === undefined || sessionQuery === null) {
+    throw new Error('sessionQuery service is unavailable');
+  }
+  const workspaces = (() => {
+    try {
+      return registry === undefined || registry === null ? [] : registry.list();
+    } catch (err) {
+      return [];
+    }
+  })();
+  const workspaceByPath = new Map();
+  const workspaceOrder = new Map();
+  workspaces.forEach((workspace, index) => {
+    const key = normalizePath(workspace.path);
+    if (key.length > 0) workspaceByPath.set(key, workspace);
+    workspaceOrder.set(workspace.id, index);
+  });
+  const archivedIds = (() => {
+    try {
+      const ids = registry?.archivedSessionIds;
+      if (ids === undefined || ids === null) return new Set();
+      return new Set(Array.from(ids, (id) => String(id)));
+    } catch (err) {
+      return new Set();
+    }
+  })();
+  return { sessionQuery, registry, workspaces, workspaceByPath, workspaceOrder, archivedIds };
+}
+
+function collectMediaFromEvents(events) {
+  const items = new Map();
+  for (const event of events) {
+    if (event === null || typeof event !== 'object') continue;
+    if (!SEARCHABLE_EVENT_TYPES.includes(event.type)) continue;
+    const blocks = contentBlocksOf(event);
+    if (blocks === null) continue;
+    const speaker = speakerOf(event.type, event.data) === 'user' ? 'user' : 'assistant';
+
+    for (const block of blocks) {
+      if (block === null || typeof block !== 'object') continue;
+
+      if (block.type === 'image') {
+        const item = mediaFromAttachment(block);
+        if (item === null) continue;
+        const existing = items.get(item.id);
+        if (existing !== undefined) {
+          if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
+          continue;
+        }
+        items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
+        continue;
+      }
+
+      if (block.type !== 'text' || typeof block.text !== 'string') continue;
+      const matches = block.text.match(MEDIA_PATH_RE);
+      if (matches === null) continue;
+      for (const raw of matches) {
+        const item = mediaFromPath(raw);
+        if (item === null) continue;
+        const existing = items.get(item.id);
+        if (existing !== undefined) {
+          if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
+          continue;
+        }
+        items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
+      }
+    }
+  }
+  return items;
+}
+
+async function readTitles(sessionQuery, sessionIds, signal) {
+  const titles = new Map();
+  try {
+    const observations = await sessionQuery.readTitleSnapshots(sessionIds, signal);
+    for (const observation of observations) {
+      if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
+        titles.set(observation.sessionId, observation.value.title.title);
+      }
+    }
+  } catch (err) {
+    /* titles are a nicety */
+  }
+  return titles;
+}
+
+/**
+ * The lazy media page opens with a plain outline — workspaces, then their
+ * conversations — and only some conversations are ever read. Building the
+ * outline must not touch a single session log, or opening the tab would be as
+ * slow as the full scan.
+ */
+async function buildMediaTree(ctx, signal) {
+  const { sessionQuery, workspaces, workspaceByPath, workspaceOrder, archivedIds } = sessionLookup(ctx);
+  const startedAt = Date.now();
+  const records = await sessionQuery.listSessions(signal);
+  const targets = records.filter((record) => {
+    const header = record.header;
+    if (header === undefined || typeof header.id !== 'string') return false;
+    if (header.origin === 'subagent') return false;
+    return true;
+  });
+
+  const titles = await readTitles(sessionQuery, targets.map((record) => record.header.id), signal);
+
+  const groups = new Map();
+  for (const workspace of workspaces) {
+    groups.set(workspace.id, {
+      workspaceId: workspace.id,
+      workspaceTitle: workspace.title,
+      workspacePath: workspace.path,
+      order: workspaceOrder.get(workspace.id) ?? Number.MAX_SAFE_INTEGER,
+      sessions: [],
+    });
+  }
+
+  for (const record of targets) {
+    const header = record.header;
+    const workspace = workspaceByPath.get(normalizePath(header.cwd)) ?? null;
+    const key = workspace === null ? '__unowned__' : workspace.id;
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { workspaceId: null, workspaceTitle: null, workspacePath: null, order: Number.MAX_SAFE_INTEGER, sessions: [] };
+      groups.set(key, group);
+    }
+    group.sessions.push({
+      sessionId: header.id,
+      title: titles.get(header.id) ?? null,
+      archived: archivedIds.has(String(header.id)),
+      live: record.live === true,
+      createdAt: header.createdAt ?? 0,
+      cwd: header.cwd ?? null,
+    });
+  }
+
+  const ordered = Array.from(groups.values())
+    .filter((group) => group.sessions.length > 0)
+    .sort((left, right) => left.order - right.order);
+
+  for (const group of ordered) {
+    group.sessions.sort((left, right) => {
+      if (left.archived !== right.archived) return left.archived ? 1 : -1;
+      return (right.createdAt ?? 0) - (left.createdAt ?? 0);
+    });
+  }
+
+  return {
+    tookMs: Date.now() - startedAt,
+    sessions: targets.length,
+    workspaces: ordered.map((group) => ({
+      workspaceId: group.workspaceId,
+      workspaceTitle: group.workspaceTitle,
+      workspacePath: group.workspacePath,
+      total: group.sessions.length,
+      sessions: group.sessions,
+    })),
+  };
+}
+
+/** Reads exactly one conversation; this is what a click on it triggers. */
+async function runMediaSession(ctx, sessionId, signal) {
+  const { sessionQuery, workspaceByPath, archivedIds } = sessionLookup(ctx);
+  const startedAt = Date.now();
+
+  let snapshot;
+  try {
+    snapshot = await sessionQuery.readSession(sessionId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error('session unreadable: ' + message);
+  }
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const header = snapshot?.session ?? { id: sessionId };
+  const items = Array.from(collectMediaFromEvents(events).values());
+
+  const workspace = workspaceByPath.get(normalizePath(header.cwd)) ?? null;
+  const titles = await readTitles(sessionQuery, [sessionId], signal);
+  const enriched = items.map((item) => ({
+    sessionId: header.id ?? sessionId,
+    title: titles.get(sessionId) ?? null,
+    workspaceId: workspace === null ? null : workspace.id,
+    workspaceTitle: workspace === null ? null : workspace.title,
+    workspacePath: workspace === null ? (header.cwd ?? null) : workspace.path,
+    cwd: header.cwd ?? null,
+    live: false,
+    archived: archivedIds.has(String(sessionId)),
+    createdAt: header.createdAt ?? 0,
+    ...item,
+  }));
+  for (const item of enriched) rememberMedia(item);
+
+  return {
+    tookMs: Date.now() - startedAt,
+    sessionId,
+    title: titles.get(sessionId) ?? null,
+    archived: archivedIds.has(String(sessionId)),
+    total: enriched.length,
+    counts: {
+      user: enriched.reduce((total, item) => (item.speaker === 'user' ? total + 1 : total), 0),
+      assistant: enriched.reduce((total, item) => (item.speaker === 'assistant' ? total + 1 : total), 0),
+      image: enriched.reduce((total, item) => (item.kind === 'image' ? total + 1 : total), 0),
+      video: enriched.reduce((total, item) => (item.kind === 'video' ? total + 1 : total), 0),
+    },
+    items: enriched,
+  };
+}
+
+function sniffImageType(target) {
+  let handle = null;
+  try {
+    handle = fs.openSync(target, 'r');
+    const head = Buffer.alloc(12);
+    const read = fs.readSync(handle, head, 0, 12, 0);
+    if (read >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
+      return 'image/png';
+    }
+    if (read >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
+    if (read >= 12 && head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') {
+      return 'image/webp';
+    }
+    if (read >= 3 && head.toString('ascii', 0, 3) === 'GIF') return 'image/gif';
+    if (read >= 2 && head[0] === 0x42 && head[1] === 0x4d) return 'image/bmp';
+    return 'application/octet-stream';
+  } catch (err) {
+    return 'application/octet-stream';
+  } finally {
+    if (handle !== null) {
+      try {
+        fs.closeSync(handle);
+      } catch (err) {
+        /* already closed */
+      }
+    }
+  }
+}
+
+function streamFile(res, target, mediaType) {
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch (err) {
+    sendJson(res, 404, { error: 'not-found' });
+    return;
+  }
+  if (!stat.isFile()) {
+    sendJson(res, 404, { error: 'not-found' });
+    return;
+  }
+  if (stat.size > MEDIA_DEFAULTS.maxBytes) {
+    sendJson(res, 413, { error: 'too-large', max: MEDIA_DEFAULTS.maxBytes });
+    return;
+  }
+  res.writeHead(200, {
+    'content-type': mediaType,
+    'content-length': String(stat.size),
+    'cache-control': 'private, max-age=600',
+  });
+  const stream = fs.createReadStream(target);
+  stream.on('error', () => {
+    try {
+      res.destroy();
+    } catch (nested) {
+      /* the socket is already gone */
+    }
+  });
+  stream.pipe(res);
+}
+
+function serveAttachment(res, req) {
+  const hex = (readParams(req).get('sha') ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hex)) {
+    sendJson(res, 400, { error: 'bad-id' });
+    return;
+  }
+  const target = join(dshHome(), ...ATTACHMENT_OBJECTS, hex.slice(0, 2), hex);
+  streamFile(res, target, sniffImageType(target));
+}
+
+function serveMediaFile(res, req) {
+  const target = readParams(req).get('path') ?? '';
+  const mediaType = MEDIA_TYPES[extname(target).toLowerCase()];
+  if (mediaType === undefined) {
+    sendJson(res, 415, { error: 'unsupported-media' });
+    return;
+  }
+  streamFile(res, target, mediaType);
+}
+
+function serveMediaReveal(res, req) {
+  const id = readParams(req).get('id') ?? '';
+  const entry = mediaIndex.get(id);
+  if (entry === undefined) {
+    sendJson(res, 404, { error: 'unknown-media' });
+    return;
+  }
+  try {
+    if (entry.source === 'attachment') {
+      const folder = join(dshHome(), ...ATTACHMENT_OBJECTS, entry.hex.slice(0, 2));
+      if (!fs.existsSync(folder)) {
+        sendJson(res, 404, { error: 'not-found' });
+        return;
+      }
+      revealInExplorer(folder, false);
+    } else {
+      if (!fs.existsSync(entry.path)) {
+        sendJson(res, 404, { error: 'not-found' });
+        return;
+      }
+      revealInExplorer(entry.path.replace(/\//g, '\\'), true);
+    }
+    sendJson(res, 200, { ok: true, id });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    sendJson(res, 500, { error: 'reveal-failed', message });
+  }
+}
+
+function serveMediaDelete(res, req) {
+  if ((req.method ?? 'GET').toUpperCase() !== 'POST') {
+    sendJson(res, 405, { error: 'method-not-allowed' });
+    return;
+  }
+  const id = readParams(req).get('id') ?? '';
+  const entry = mediaIndex.get(id);
+  if (entry === undefined) {
+    sendJson(res, 404, { error: 'unknown-media' });
+    return;
+  }
+  /* An attachment is part of the session log itself: removing it would leave a
+     conversation whose images can never render again. */
+  if (entry.source === 'attachment') {
+    sendJson(res, 403, { error: 'attachment-protected' });
+    return;
+  }
+  try {
+    fs.unlinkSync(entry.path);
+  } catch (err) {
+    const code = err !== null && typeof err === 'object' ? err.code : undefined;
+    if (code === 'ENOENT') {
+      mediaIndex.delete(id);
+      sendJson(res, 404, { error: 'not-found' });
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    sendJson(res, 500, { error: 'delete-failed', message });
+    return;
+  }
+  mediaIndex.delete(id);
+  sendJson(res, 200, { ok: true, id });
+}
+
 /* ------------------------------------------------------------------- route */
 
 function readParams(req) {
@@ -519,7 +1195,79 @@ async function handleRequest(ctx, req, res) {
   const path = (req.url ?? '').split('?')[0];
 
   if (path === `${ROUTE_PREFIX}/health`) {
-    sendJson(res, 200, { ok: true, route: ROUTE_PREFIX, version: 3 });
+    sendJson(res, 200, { ok: true, route: ROUTE_PREFIX, version: 6 });
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media`) {
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      const payload = await runMedia(
+        ctx,
+        { total: clampInt(params.get('total'), MEDIA_DEFAULTS.total, 1, 2000), concurrency: MEDIA_DEFAULTS.concurrency },
+        controller.signal,
+      );
+      sendJson(res, 200, payload);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: 'media-failed', message });
+    }
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/tree`) {
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      sendJson(res, 200, await buildMediaTree(ctx, controller.signal));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: 'media-tree-failed', message });
+    }
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/session`) {
+    const sessionId = params.get('id') ?? '';
+    if (sessionId.length === 0) {
+      sendJson(res, 400, { error: 'bad-id' });
+      return;
+    }
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      sendJson(res, 200, await runMediaSession(ctx, sessionId, controller.signal));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: 'media-session-failed', message });
+    }
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/attachment`) {
+    serveAttachment(res, req);
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/file`) {
+    serveMediaFile(res, req);
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/reveal`) {
+    serveMediaReveal(res, req);
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/delete`) {
+    serveMediaDelete(res, req);
     return;
   }
 
