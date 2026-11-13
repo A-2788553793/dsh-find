@@ -121,6 +121,79 @@ function byteLength(text) {
   return Buffer.byteLength(text);
 }
 
+/* --------------------------------------------------------------- settings */
+
+/** The palette may either follow the host theme or pin itself to one theme. */
+const THEME_VALUES = ['auto', 'dark', 'light'];
+const DEFAULT_SETTINGS = { theme: 'auto' };
+
+function settingsDir() {
+  return join(dshHome(), 'storages', 'dsh-find');
+}
+
+function settingsFile() {
+  return join(settingsDir(), 'settings.json');
+}
+
+function normalizeTheme(value) {
+  return THEME_VALUES.includes(value) ? value : 'auto';
+}
+
+function readSettings() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
+    return { theme: normalizeTheme(parsed !== null && typeof parsed === 'object' ? parsed.theme : undefined) };
+  } catch (err) {
+    return Object.assign({}, DEFAULT_SETTINGS);
+  }
+}
+
+function writeSettings(patch) {
+  const next = Object.assign(readSettings(), patch);
+  next.theme = normalizeTheme(next.theme);
+  try {
+    fs.mkdirSync(settingsDir(), { recursive: true });
+    fs.writeFileSync(settingsFile(), JSON.stringify(next, null, 2) + '\n', 'utf8');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return Object.assign({ ok: false, reason: message }, readSettings());
+  }
+  return Object.assign({ ok: true }, next);
+}
+
+function readJsonBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        tooLarge = true;
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (tooLarge) {
+        reject(new Error('body exceeds ' + limit + ' bytes'));
+        return;
+      }
+      const text = Buffer.concat(chunks).toString('utf8');
+      if (text.trim().length === 0) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(text));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 /* ----------------------------------------------------------------- blocks */
 
 /**
@@ -1410,13 +1483,34 @@ async function handleRequest(ctx, req, res) {
     sendJson(res, 200, {
       ok: true,
       route: ROUTE_PREFIX,
-      version: 7,
+      version: 8,
+      settings: readSettings(),
       commands: registrationStatus.commands,
       commandErrors: registrationStatus.commandErrors,
       tool: registrationStatus.tool,
       toolErrors: registrationStatus.toolErrors,
       runs: registrationStatus.runs,
     });
+    return;
+  }
+
+  if (path === `${ROUTE_PREFIX}/settings`) {
+    if ((req.method ?? 'GET').toUpperCase() === 'POST') {
+      readJsonBody(req, 8192)
+        .then((body) => {
+          const theme = normalizeTheme(body !== null && typeof body === 'object' ? body.theme : undefined);
+          const result = writeSettings({ theme });
+          sendJson(res, result.ok === false ? 500 : 200, result);
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          sendJson(res, 400, { ok: false, error: 'bad-body', reason: message });
+        });
+      return;
+    }
+    /* saved: false means the file has never been written, which lets a client
+       tell "explicitly set to auto" apart from "nothing stored yet". */
+    sendJson(res, 200, Object.assign({ ok: true, saved: fs.existsSync(settingsFile()) }, readSettings()));
     return;
   }
 

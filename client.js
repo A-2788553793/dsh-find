@@ -86,6 +86,18 @@ window.__ModuleLoader__.load({
         deleted: '已删除 {name}',
         revealMissing: '文件已经不在原来的位置了',
         revealFailed: '打开失败',
+        themeTitle: '窗口配色',
+        themeDesc: '只影响 Ctrl+F 查找面板；「跟随 DSH」会随 DSH 的深浅色自动切换。',
+        themeAuto: '跟随DSH',
+        themeAutoHint: 'DSH 切换深浅色时一起变',
+        themeDark: '深色',
+        themeDarkHint: '面板固定深色，不跟随 DSH',
+        themeLight: '浅色',
+        themeLightHint: '面板固定浅色，不跟随 DSH',
+        themeSaving: '正在保存…',
+        themeSaved: '已保存，打开 Ctrl+F 面板就能看到效果',
+        themeLocal: '已应用到本窗口；重启 DSH 后会写进配置',
+        themeFailed: '设置没能保存：{message}',
       },
       en: {
         title: 'Find in conversations',
@@ -151,12 +163,24 @@ window.__ModuleLoader__.load({
         deleted: 'Deleted {name}',
         revealMissing: 'The file is no longer at that location',
         revealFailed: 'Could not open it',
+        themeTitle: 'Panel theme',
+        themeDesc: 'Only affects the Ctrl+F panel; “Follow DSH” tracks the DSH light/dark theme.',
+        themeAuto: 'Follow DSH',
+        themeAutoHint: 'Switches together with DSH',
+        themeDark: 'Dark',
+        themeDarkHint: 'Always dark, regardless of DSH',
+        themeLight: 'Light',
+        themeLightHint: 'Always light, regardless of DSH',
+        themeSaving: 'Saving…',
+        themeSaved: 'Saved — open the Ctrl+F panel to see it',
+        themeLocal: 'Applied in this window; DSH will persist it after a restart',
+        themeFailed: 'Could not save the setting: {message}',
       },
     };
 
     const CSS = [
       '.dsh-find-overlay{position:fixed;inset:0;display:flex;align-items:flex-start;justify-content:center;padding:8vh 16px 16px;box-sizing:border-box;pointer-events:auto;z-index:2147480000;}',
-      '.dsh-find-backdrop{position:absolute;inset:0;background:var(--dsw-alias-bg-base);opacity:.42;}',
+      '.dsh-find-backdrop{position:absolute;inset:0;background:var(--df-backdrop,var(--dsw-alias-bg-base));opacity:.42;}',
       '.dsh-find-panel{position:relative;width:100%;max-width:1080px;height:76vh;display:flex;flex-direction:column;border-radius:14px;background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l1);box-shadow:0 20px 60px rgba(0,0,0,.28);overflow:hidden;box-sizing:border-box;}',
       '.dsh-find-head{flex:none;display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
       '.dsh-find-icon{flex:none;width:16px;height:16px;color:var(--dsw-alias-label-secondary);display:flex;align-items:center;justify-content:center;}',
@@ -261,6 +285,23 @@ window.__ModuleLoader__.load({
       '.dsh-find-menu-danger{color:#e5484d;font-weight:600;}',
       '.dsh-find-menu-danger:hover{background:rgba(229,72,77,.10);}',
       '.dsh-find-menu-error{padding:6px 10px 7px;font-size:11.5px;line-height:1.5;color:#e5484d;white-space:normal;}',
+      /* Theme pinning: the palette only ever paints through these tokens, so
+         overriding them on the overlay root re-themes the whole panel. */
+      '.dsh-find-overlay[data-dfind-theme="dark"]{--df-backdrop:rgba(0,0,0,.46);--dsw-alias-bg-base:#151517;--dsw-alias-bg-layer-1:#232324;--dsw-alias-bg-layer-2:#2c2c2e;--dsw-alias-border-l1:rgba(255,255,255,.08);--dsw-alias-border-l2:rgba(255,255,255,.16);--dsw-alias-label-primary:#eceef1;--dsw-alias-label-secondary:#a4a9b0;--dsw-alias-label-tertiary:#7d838a;--dsw-alias-brand-primary:#f3f4f6;--dsw-specific-sidebar-fill:#1b1b1c;}',
+      '.dsh-find-overlay[data-dfind-theme="light"]{--df-backdrop:rgba(0,0,0,.32);--dsw-alias-bg-base:#ffffff;--dsw-alias-bg-layer-1:#f6f7f9;--dsw-alias-bg-layer-2:#eceef2;--dsw-alias-border-l1:rgba(15,17,21,.10);--dsw-alias-border-l2:rgba(15,17,21,.18);--dsw-alias-label-primary:#14171c;--dsw-alias-label-secondary:#5b616a;--dsw-alias-label-tertiary:#8a9099;--dsw-alias-brand-primary:#14171c;--dsw-specific-sidebar-fill:#f2f4f7;}',
+      /* Settings page (lives in the native settings modal, never in the panel). */
+      '.df-theme-page{padding:4px 0 12px;max-width:680px;box-sizing:border-box;}',
+      '.df-theme-title{margin:0 0 6px;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary);}',
+      '.df-theme-desc{margin:0 0 12px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);}',
+      '.df-theme-cards{display:flex;gap:10px;flex-wrap:wrap;}',
+      '.df-theme-card{flex:1 1 130px;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;padding:16px 12px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:13px;cursor:pointer;transition:background .12s,border-color .12s;}',
+      '.df-theme-card:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.df-theme-card[data-active="true"]{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-bg-layer-1);}',
+      '.df-theme-icon{display:flex;align-items:center;justify-content:center;width:22px;height:22px;color:var(--dsw-alias-label-primary);}',
+      '.df-theme-name{font-size:13px;line-height:1.3;}',
+      '.df-theme-hint{font-size:11.5px;line-height:1.45;text-align:center;color:var(--dsw-alias-label-secondary);}',
+      '.df-theme-status{margin:10px 0 0;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);}',
+      '.df-theme-status[data-error="true"]{color:var(--dsw-alias-state-error-primary,#e5484d);}',
     ].join('');
 
     /* -------------------------------------------------------------- store */
@@ -285,6 +326,7 @@ window.__ModuleLoader__.load({
       preview: null,
       menu: null,
       notice: '',
+      theme: 'auto',
     };
     const listeners = new Set();
     let ctxRef = null;
@@ -393,6 +435,81 @@ window.__ModuleLoader__.load({
       } catch (err) {
         return null;
       }
+    }
+
+    /* ----------------------------------------------------------- settings */
+
+    const THEMES = ['auto', 'dark', 'light'];
+
+    function normalizeTheme(value) {
+      return THEMES.indexOf(value) >= 0 ? value : 'auto';
+    }
+
+    /* The preference belongs to the Host so it survives a reload and is shared
+       by every window. The local copy is a mirror: it keeps the choice working
+       in a window whose Host build predates the settings route, and once such a
+       Host is reloaded the stored value migrates up on the next page load. */
+    const THEME_STORAGE_KEY = 'dsh-find.theme';
+
+    function readLocalTheme() {
+      try {
+        const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+        return THEMES.indexOf(value) >= 0 ? value : '';
+      } catch (err) {
+        return '';
+      }
+    }
+
+    function writeLocalTheme(theme) {
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+      } catch (err) {
+        /* private browsing and similar modes simply skip the mirror */
+      }
+    }
+
+    function postTheme(theme) {
+      return fetch(ROUTE + '/settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ theme }),
+      }).then((response) => {
+        /* A Host build without the settings route answers 404 here; that is an
+           old build, not a failure worth surfacing as an error. */
+        if (response.status === 404 || response.status === 405) throw new Error('unsupported');
+        return response.json().then((data) => ({ ok: response.ok, data }));
+      });
+    }
+
+    function loadSettings() {
+      const local = readLocalTheme();
+      if (local !== '') setStore({ theme: local });
+      return fetch(ROUTE + '/settings', { headers: { accept: 'application/json' } })
+        .then((response) => {
+          if (!response.ok) throw new Error('unsupported');
+          return response.json();
+        })
+        .then((data) => {
+          if (data === null || typeof data !== 'object' || typeof data.theme !== 'string') return;
+          if (data.saved === true) {
+            const theme = normalizeTheme(data.theme);
+            setStore({ theme });
+            writeLocalTheme(theme);
+            return;
+          }
+          /* Nothing stored on the Host yet: push the local mirror up once. */
+          if (local === '') return;
+          postTheme(local)
+            .then((result) => {
+              if (result.ok && result.data && result.data.ok === true) writeLocalTheme(local);
+            })
+            .catch(() => {
+              /* the Host may still be read-only; the mirror keeps working */
+            });
+        })
+        .catch(() => {
+          /* no settings route: the mirror alone drives the palette */
+        });
     }
 
     /* ------------------------------------------------------------- search */
@@ -1683,6 +1800,7 @@ window.__ModuleLoader__.load({
             className: 'dsh-find-overlay',
             key: 'overlay',
             'data-dsh-find-dialog': 'true',
+            'data-dfind-theme': state.theme === 'dark' || state.theme === 'light' ? state.theme : 'auto',
             role: 'dialog',
             'aria-modal': 'true',
             'aria-label': t('title'),
@@ -1877,6 +1995,123 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /* ------------------------------------------------------- settings page */
+
+    /* Rendered inside the native settings modal, never inside the palette, so
+       it uses the Host tokens directly and is never re-themed by the palette. */
+    function themeIcon(kind) {
+      const common = {
+        width: 22,
+        height: 22,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.6,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      };
+      if (kind === 'dark') {
+        return h('svg', common, h('path', { d: 'M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z' }));
+      }
+      if (kind === 'light') {
+        return h(
+          'svg',
+          common,
+          h('circle', { cx: 12, cy: 12, r: 4 }),
+          h('path', {
+            d: 'M12 2.6v2.1M12 19.3v2.1M2.6 12h2.1M19.3 12h2.1M5.4 5.4l1.5 1.5M17.1 17.1l1.5 1.5M18.6 5.4l-1.5 1.5M6.9 17.1l-1.5 1.5',
+          }),
+        );
+      }
+      return h(
+        'svg',
+        common,
+        h('circle', { cx: 12, cy: 12, r: 8.2 }),
+        h('path', { d: 'M12 3.8a8.2 8.2 0 0 1 0 16.4z', fill: 'currentColor', stroke: 'none' }),
+      );
+    }
+
+    const THEME_OPTIONS = [
+      { value: 'auto', name: 'themeAuto', hint: 'themeAutoHint' },
+      { value: 'dark', name: 'themeDark', hint: 'themeDarkHint' },
+      { value: 'light', name: 'themeLight', hint: 'themeLightHint' },
+    ];
+
+    function SettingsSection() {
+      const state = useStore();
+      const t = React.useMemo(makeT, []);
+      const theme = normalizeTheme(state.theme);
+      const [status, setStatus] = React.useState('idle');
+      const [error, setError] = React.useState('');
+
+      React.useEffect(() => {
+        void loadSettings();
+      }, []);
+
+      const choose = (value) => {
+        if (value === theme && status !== 'error' && status !== 'local') return;
+        const previous = theme;
+        setStore({ theme: value });
+        writeLocalTheme(value);
+        setStatus('saving');
+        setError('');
+        postTheme(value)
+          .then((result) => {
+            const data = result.data;
+            if (!result.ok || data === null || typeof data !== 'object' || data.ok !== true) {
+              const reason = (data && (data.reason || data.error)) || 'request failed';
+              throw new Error(String(reason));
+            }
+            setStore({ theme: normalizeTheme(data.theme) });
+            setStatus('saved');
+          })
+          .catch((err) => {
+            const message = String((err && err.message) || err);
+            /* The local mirror already holds the choice; this Host build just
+               predates the settings route and will pick it up when reloaded. */
+            if (message === 'unsupported') {
+              setStatus('local');
+              return;
+            }
+            setStore({ theme: previous });
+            setStatus('error');
+            setError(message);
+          });
+      };
+
+      const cards = THEME_OPTIONS.map((option) =>
+        h(
+          'button',
+          {
+            key: option.value,
+            type: 'button',
+            className: 'df-theme-card',
+            'data-active': option.value === theme ? 'true' : 'false',
+            'aria-pressed': option.value === theme ? 'true' : 'false',
+            onClick: () => choose(option.value),
+          },
+          h('span', { className: 'df-theme-icon' }, themeIcon(option.value)),
+          h('span', { className: 'df-theme-name' }, t(option.name)),
+          h('span', { className: 'df-theme-hint' }, t(option.hint)),
+        ),
+      );
+
+      return h(
+        'div',
+        { className: 'df-theme-page' },
+        h('style', { key: 'style' }, CSS),
+        h('h3', { className: 'df-theme-title' }, t('themeTitle')),
+        h('p', { className: 'df-theme-desc' }, t('themeDesc')),
+        h('div', { className: 'df-theme-cards' }, cards),
+        status === 'saving' ? h('p', { className: 'df-theme-status' }, t('themeSaving')) : null,
+        status === 'saved' ? h('p', { className: 'df-theme-status' }, t('themeSaved')) : null,
+        status === 'local' ? h('p', { className: 'df-theme-status' }, t('themeLocal')) : null,
+        status === 'error'
+          ? h('p', { className: 'df-theme-status', 'data-error': 'true' }, t('themeFailed', { message: error }))
+          : null,
+      );
+    }
+
     /* -------------------------------------------------------------- mount */
 
     function install(ctx) {
@@ -1940,6 +2175,28 @@ window.__ModuleLoader__.load({
         }, 'dsh-find: ctrl+f capture');
       } catch (err) {
         console.warn('[dsh-find] failed to install the keyboard capture', err);
+      }
+
+      try {
+        void loadSettings();
+      } catch (err) {
+        /* the palette falls back to the host theme */
+      }
+
+      try {
+        ctx.slots.inject('settings.section', () =>
+          ctx.slots.register(
+            {
+              name: 'settings.section',
+              id: 'dsh-find',
+              order: 37,
+              label: pickLang() === 'en' ? 'Find' : '查找',
+            },
+            SettingsSection,
+          ),
+        );
+      } catch (err) {
+        console.warn('[dsh-find] failed to register the settings section', err);
       }
 
       try {
