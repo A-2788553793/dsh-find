@@ -1,6 +1,6 @@
 {
   "name": "dsh-find",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Ctrl+F full-text search plus a local image/video browser across every workspace and conversation in DeepSeek Harness, executed entirely locally.",
   "type": "module",
   "license": "MIT",
