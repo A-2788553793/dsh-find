@@ -514,6 +514,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------- search */
 
+    const TEXT_SEARCH_IDLE = { searched: '', loading: false, error: '', payload: null };
     let searchToken = 0;
     let inflight = null;
     let debounceTimer = null;
@@ -539,14 +540,11 @@ window.__ModuleLoader__.load({
       searchToken += 1;
     }
 
-    function scheduleSearch(query) {
+    function scheduleSearch(query, patch) {
       cancelSearch();
       const trimmed = query.trim();
-      if (trimmed.length === 0) {
-        setStore({ loading: false, error: '', payload: null, searched: '' });
-        return;
-      }
-      setStore({ loading: true, error: '' });
+      setStore({ ...patch, ...TEXT_SEARCH_IDLE, query, searched: trimmed, loading: trimmed.length > 0 });
+      if (trimmed.length === 0) return;
       const token = searchToken;
       debounceTimer = setTimeout(() => {
         debounceTimer = null;
@@ -561,12 +559,7 @@ window.__ModuleLoader__.load({
     function submitSearch() {
       const query = store.query.trim();
       if (query.length === 0) {
-        setStore({
-          loading: false,
-          error: '',
-          payload: null,
-          searched: '',
-        });
+        setStore(TEXT_SEARCH_IDLE);
         return;
       }
       cancelSearch();
@@ -952,18 +945,15 @@ window.__ModuleLoader__.load({
 
     function openPalette() {
       const selection = readSelectionText();
-      const query = selection !== null ? selection : store.query;
-      setStore({ open: true, tab: 'text', notice: '', preview: null, menu: null });
       if (selection !== null && selection !== store.query) {
-        setStore({ query: selection });
-        scheduleSearch(selection);
+        openPaletteWith(selection);
+        return;
       }
+      setStore({ open: true, tab: 'text', notice: '', preview: null, menu: null });
     }
 
     function openPaletteWith(query) {
-      cancelSearch();
-      setStore({ open: true, tab: 'text', query, notice: '', preview: null, menu: null });
-      scheduleSearch(query);
+      scheduleSearch(query, { open: true, tab: 'text', notice: '', preview: null, menu: null });
     }
 
     /**
@@ -1787,7 +1777,9 @@ window.__ModuleLoader__.load({
 
       const onChange = (event) => {
         const value = event.target.value.slice(0, MAX_QUERY);
-        setStore({ query: value });
+        if (value === store.query) return;
+        if (inflight !== null || debounceTimer !== null) cancelSearch();
+        setStore({ ...TEXT_SEARCH_IDLE, query: value });
       };
 
       return h(
