@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
     const PER_SESSION = 3;
     const FLASH_CLASS = 'dsh-find-flash';
     const MEDIA_TOTAL = 800;
+    const FILES_CONCURRENCY = 4;
     const SPEAKER_LABELS = {
       user: 'speakerUser',
       assistant: 'speakerAssistant',
@@ -45,6 +46,25 @@ window.__ModuleLoader__.load({
         paneEmpty: '此栏没有命中',
         tabText: '文本',
         tabMedia: '图片/视频',
+        tabFiles: '文件',
+        filesHint: '展开工作区和对话 · 点文件名打开所在文件夹 · Esc 关闭',
+        filesOutline: '{workspaces} 个工作区 · {sessions} 个对话 · 已加载 {loaded} 个文件',
+        filesCount: '{count} 个文件',
+        filesTreeEmpty: '没有找到工作区或对话。',
+        filesEmpty: '这个对话没有文件。',
+        filesFiltered: '没有符合当前筛选条件的文件。',
+        filesTruncated: '只显示了部分文件。',
+        filesExpandAllHint: '读取当前可见的所有对话并载入文件（可能较慢）',
+        filesRefreshHint: '清除文件缓存，重新读取工作区与对话列表',
+        filesHideMedia: '隐藏图片/视频',
+        filesRetry: '重试',
+        filesTreeFailed: '读取文件目录失败。',
+        filesSessionFailed: '读取文件失败。',
+        filesReveal: '打开所在文件夹',
+        filesRevealing: '正在打开文件夹…',
+        filesMissing: '找不到文件，可能已被移除。',
+        filesUnavailable: '此文件无法在本机定位。',
+        filesRevealFailed: '无法打开所在文件夹，请重试。',
         mediaSummary: '{count} 个媒体 · {sessions} 个对话',
         mediaCount: '{count} 个',
         mediaEmpty: '还没有找到图片或视频。',
@@ -122,6 +142,25 @@ window.__ModuleLoader__.load({
         paneEmpty: 'No match in this pane',
         tabText: 'Text',
         tabMedia: 'Images/Videos',
+        tabFiles: 'Files',
+        filesHint: 'Expand workspaces and conversations · click a filename to open its folder · Esc to close',
+        filesOutline: '{workspaces} workspaces · {sessions} conversations · {loaded} files loaded',
+        filesCount: '{count} files',
+        filesTreeEmpty: 'No workspaces or conversations found.',
+        filesEmpty: 'This conversation has no files.',
+        filesFiltered: 'No files match the current filters.',
+        filesTruncated: 'Only some files are shown.',
+        filesExpandAllHint: 'Read all visible conversations and load their files (may take a while)',
+        filesRefreshHint: 'Clear cached files and re-read the workspace and conversation list',
+        filesHideMedia: 'Hide Images/Videos',
+        filesRetry: 'Retry',
+        filesTreeFailed: 'Could not load the file tree.',
+        filesSessionFailed: 'Could not load files.',
+        filesReveal: 'Open containing folder',
+        filesRevealing: 'Opening folder…',
+        filesMissing: 'File not found. It may have been removed.',
+        filesUnavailable: 'This file cannot be located on this machine.',
+        filesRevealFailed: 'Could not open the containing folder. Try again.',
         mediaSummary: '{count} media · {sessions} conversations',
         mediaCount: '{count}',
         mediaEmpty: 'No images or videos found yet.',
@@ -275,6 +314,21 @@ window.__ModuleLoader__.load({
       '.dsh-find-session-state{flex:none;font-size:11.5px;color:var(--dsw-alias-label-tertiary);}',
       '.dsh-find-session-state[data-status="ready"]{color:var(--dsw-alias-label-secondary);}',
       '.dsh-find-session-state[data-status="error"]{color:#e5484d;}',
+      '.dsh-find-files-head{flex-wrap:nowrap;white-space:nowrap;overflow-x:auto;}',
+      '.dsh-find-files-head .dsh-find-media-summary{flex:1 0 auto;}',
+      '.dsh-find-files-branch{width:100%;box-sizing:border-box;appearance:none;border:0;background:transparent;font:inherit;text-align:left;}',
+      '.dsh-find-files-branch.dsh-find-card-head{border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
+      '.dsh-find-files-branch:focus-visible,.dsh-find-file-name:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px;}',
+      '.dsh-find-file-list{margin:0;padding:4px 12px 6px 32px;list-style:none;}',
+      '.dsh-find-file-line{display:flex;align-items:center;gap:8px;padding:2px 0;}',
+      '.dsh-find-file-line .dsh-find-speaker{flex:none;margin:0;}',
+      '.dsh-find-file-name{appearance:none;min-width:0;max-width:100%;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 6px;}',
+      '.dsh-find-file-name:not([aria-disabled="true"]){cursor:pointer;}',
+      '.dsh-find-file-name:hover,.dsh-find-file-name:focus-visible{background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-files-message{padding:4px 12px 6px 32px;font-size:11.5px;color:var(--dsw-alias-label-secondary);}',
+      '.dsh-find-file-list .dsh-find-files-message{padding:0 0 4px 6px;}',
+      '.dsh-find-files-message[data-error="true"]{color:var(--dsw-alias-state-error-primary,var(--dsw-alias-label-primary));}',
+      '.dsh-find-files-message .dsh-find-refresh{margin-inline-start:8px;}',
       '.dsh-find-preview{position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:28px;background:rgba(0,0,0,.76);cursor:zoom-out;}',
       '.dsh-find-preview-media{max-width:92vw;max-height:82vh;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.45);cursor:default;background:#000;}',
       '.dsh-find-preview-caption{position:absolute;bottom:18px;left:0;right:0;text-align:center;font-size:12px;color:rgba(255,255,255,.86);}',
@@ -323,6 +377,19 @@ window.__ModuleLoader__.load({
       expanded: {},
       sessionMedia: {},
       mediaSpeakers: { user: true, assistant: true },
+      files: {
+        tree: null,
+        loading: false,
+        error: false,
+        expanding: false,
+        workspacesOpen: new Set(),
+        sessionsOpen: new Set(),
+        sessions: new Map(),
+        reveals: new Map(),
+        speakers: { user: true, assistant: true },
+        hideArchived: false,
+        hideMedia: false,
+      },
       preview: null,
       menu: null,
       notice: '',
@@ -620,9 +687,10 @@ window.__ModuleLoader__.load({
      * flipping tabs does not re-walk every session log.
      */
     function switchTab(tab) {
-      if (tab !== 'text' && tab !== 'media') return;
+      if (tab !== 'text' && tab !== 'media' && tab !== 'files') return;
       setStore({ tab, preview: null, menu: null });
       if (tab === 'media' && store.mediaTree === null && !store.mediaTreeLoading) void loadMediaTree();
+      if (tab === 'files' && filesScan === null) void rescanFiles();
     }
 
     function toggleMediaSpeaker(key) {
@@ -941,6 +1009,156 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /* -------------------------------------------------------------- files */
+
+    // Every rescan owns its requests; late results cannot repopulate the new tree.
+    let filesScan = null;
+
+    function setFiles(patch) {
+      setStore({ files: { ...store.files, ...patch } });
+    }
+
+    function filesWorkspaces(files) {
+      return files.tree === null ? [] : files.tree.workspaces;
+    }
+
+    function visibleFileSessions(files, workspace) {
+      return files.hideArchived ? workspace.sessions.filter((session) => session.archived !== true) : workspace.sessions;
+    }
+
+    async function rescanFiles() {
+      if (filesScan !== null) filesScan.controller.abort();
+      const scan = { controller: new AbortController(), pending: new Map(), batch: null };
+      filesScan = scan;
+      setFiles({
+        tree: null, loading: true, error: false, expanding: false,
+        workspacesOpen: new Set(), sessionsOpen: new Set(), sessions: new Map(), reveals: new Map(),
+      });
+      try {
+        const response = await fetch(ROUTE + '/files/tree', {
+          headers: { accept: 'application/json' }, cache: 'no-store', signal: scan.controller.signal,
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const tree = await response.json();
+        if (!Array.isArray(tree.workspaces) || !tree.workspaces.every((workspace) =>
+          workspace && Array.isArray(workspace.sessions) && workspace.sessions.every((session) =>
+            session && typeof session.sessionId === 'string' && session.sessionId !== '',
+          ),
+        )) throw new Error('Invalid file tree');
+        if (scan === filesScan) setFiles({ tree, loading: false });
+      } catch (err) {
+        if (scan === filesScan) setFiles({ loading: false, error: true });
+      }
+    }
+
+    function toggleFileBranch(field, key) {
+      const next = new Set(store.files[field]);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      setFiles({ [field]: next });
+      return next.has(key);
+    }
+
+    function updateFileSession(sessionId, entry) {
+      const sessions = new Map(store.files.sessions);
+      sessions.set(sessionId, entry);
+      setFiles({ sessions });
+    }
+
+    function loadFileSession(scan, sessionId) {
+      if (scan !== filesScan || store.files.sessions.get(sessionId)?.status === 'ready') return;
+      if (scan.pending.has(sessionId)) return scan.pending.get(sessionId);
+      updateFileSession(sessionId, { status: 'loading' });
+      const request = (async () => {
+        try {
+          const response = await fetch(ROUTE + '/files/session?id=' + encodeURIComponent(sessionId), {
+            headers: { accept: 'application/json' }, cache: 'no-store', signal: scan.controller.signal,
+          });
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          const payload = await response.json();
+          if (!Array.isArray(payload.items)) throw new Error('Invalid file items');
+          const items = payload.items.filter((item) => item && typeof item.id === 'string' && item.id !== '' &&
+            typeof item.name === 'string' && (item.speaker === 'user' || item.speaker === 'assistant') &&
+            (item.kind === 'image' || item.kind === 'video' || item.kind === 'file'));
+          if (scan === filesScan) {
+            updateFileSession(sessionId, { status: 'ready', items, truncated: payload.truncated === true });
+          }
+        } catch (err) {
+          if (scan === filesScan) updateFileSession(sessionId, { status: 'error' });
+        }
+      })().finally(() => scan.pending.delete(sessionId));
+      scan.pending.set(sessionId, request);
+      return request;
+    }
+
+    function toggleFileSession(sessionId) {
+      if (toggleFileBranch('sessionsOpen', sessionId) && filesScan !== null) {
+        void loadFileSession(filesScan, sessionId);
+      }
+    }
+
+    async function expandAllFiles() {
+      const files = store.files;
+      const scan = filesScan;
+      if (scan === null || scan.batch !== null || files.tree === null) return;
+      const workspaces = filesWorkspaces(files);
+      const sessionsOpen = new Set(workspaces.flatMap((workspace) =>
+        visibleFileSessions(files, workspace).map((session) => session.sessionId),
+      ));
+      if (sessionsOpen.size === 0) return;
+      const ids = [...sessionsOpen];
+      const batch = { cancelled: false };
+      scan.batch = batch;
+      setFiles({ expanding: true, workspacesOpen: new Set(workspaces.map(workspaceKey)), sessionsOpen });
+      let next = 0;
+      const worker = async () => {
+        while (!batch.cancelled && scan === filesScan && next < ids.length) {
+          const request = loadFileSession(scan, ids[next++]);
+          if (request) await request;
+        }
+      };
+      try {
+        await Promise.all(Array.from({ length: Math.min(FILES_CONCURRENCY, ids.length) }, worker));
+      } finally {
+        scan.batch = null;
+        if (scan === filesScan) setFiles({ expanding: false });
+      }
+    }
+
+    function collapseAllFiles() {
+      if (filesScan?.batch) filesScan.batch.cancelled = true;
+      setFiles({ workspacesOpen: new Set(), sessionsOpen: new Set() });
+    }
+
+    function setFileReveal(id, status) {
+      const reveals = new Map(store.files.reveals);
+      if (status) reveals.set(id, status);
+      else reveals.delete(id);
+      setFiles({ reveals });
+    }
+
+    async function revealFile(sessionId, item) {
+      const scan = filesScan;
+      // A stale handler or an item without a Host-issued reveal capability may not POST.
+      if (scan === null || item.canReveal !== true ||
+          !store.files.sessions.get(sessionId)?.items?.includes(item) ||
+          store.files.reveals.get(item.id) === 'filesRevealing') return;
+      setFileReveal(item.id, 'filesRevealing');
+      let status = 'filesRevealFailed';
+      try {
+        const response = await fetch(ROUTE + '/files/reveal?id=' + encodeURIComponent(item.id), {
+          method: 'POST', headers: { accept: 'application/json' }, signal: scan.controller.signal,
+        });
+        const payload = await response.json();
+        if (response.ok && payload.ok === true) status = null;
+        else if (payload.error === 'not-found' || payload.error === 'unknown-file') status = 'filesMissing';
+        else if (payload.error === 'unavailable') status = 'filesUnavailable';
+      } catch (err) {
+        // Transport and malformed responses use the generic inline error.
+      }
+      if (scan === filesScan) setFileReveal(item.id, status);
+    }
+
     /* ------------------------------------------------------------ palette */
 
     function openPalette() {
@@ -1120,6 +1338,144 @@ window.__ModuleLoader__.load({
       { channel: 'conversation', labelKey: 'conversationTitle' },
     ];
 
+    function FilesPanel({ files, t }) {
+      const workspaces = filesWorkspaces(files).map((workspace) => ({
+        workspace,
+        sessions: visibleFileSessions(files, workspace),
+      }));
+      const shownItems = (sessionId) => {
+        const entry = files.sessions.get(sessionId);
+        return entry?.status === 'ready'
+          ? entry.items.filter((item) => files.speakers[item.speaker] && (!files.hideMedia || item.kind === 'file'))
+          : [];
+      };
+      const counts = workspaces.map(({ sessions }) => ({
+        sessions: sessions.length,
+        files: sessions.reduce((sum, session) => sum + shownItems(session.sessionId).length, 0),
+      }));
+      const sessionCount = counts.reduce((sum, count) => sum + count.sessions, 0);
+      const fileCount = counts.reduce((sum, count) => sum + count.files, 0);
+
+      const button = (text, onClick, disabled, title) => h('button', {
+        type: 'button', className: 'dsh-find-refresh', onClick, disabled, title,
+      }, t(text));
+      const toggle = (key, label, hint) => h(
+        'label', { className: 'dsh-find-toggle', title: hint ? t(hint) : undefined },
+        h('input', { type: 'checkbox', checked: files[key], onChange: (event) => setFiles({ [key]: event.target.checked }) }),
+        h('span', null, t(label)),
+      );
+      const message = (text, error, action) => h(
+        'div', { className: 'dsh-find-files-message', 'data-error': error ? 'true' : undefined },
+        h('span', { role: error ? 'alert' : 'status' }, t(text)), action || null,
+      );
+      const head = h(
+        'div', { className: 'dsh-find-head dsh-find-files-head' },
+        files.tree === null ? null : h('span', { className: 'dsh-find-media-summary' }, t('filesOutline', {
+          workspaces: workspaces.length, sessions: sessionCount, loaded: fileCount,
+        })),
+        h('div', { className: 'dsh-find-chips' }, ['user', 'assistant'].map((speaker) => h('button', {
+          key: speaker, type: 'button', className: 'dsh-find-chip', 'data-speaker': speaker,
+          'data-on': String(files.speakers[speaker]), 'aria-pressed': files.speakers[speaker],
+          onClick: () => setFiles({ speakers: { ...store.files.speakers, [speaker]: !store.files.speakers[speaker] } }),
+        }, t(SPEAKER_LABELS[speaker])))),
+        toggle('hideArchived', 'hideArchived', 'hideArchivedHint'),
+        toggle('hideMedia', 'filesHideMedia'),
+        button(files.expanding ? 'mediaExpanding' : 'mediaExpandAll', expandAllFiles,
+          files.expanding || sessionCount === 0, t('filesExpandAllHint')),
+        button('mediaCollapseAll', collapseAllFiles,
+          files.workspacesOpen.size === 0 && files.sessionsOpen.size === 0, t('mediaCollapseAllHint')),
+        button('mediaRefresh', rescanFiles, files.loading, t('filesRefreshHint')),
+      );
+
+      const renderItem = (sessionId, item) => {
+        const available = item.canReveal === true;
+        const reveal = available ? files.reveals.get(item.id) : 'filesUnavailable';
+        const busy = reveal === 'filesRevealing';
+        return h(
+          'li', { key: item.id },
+          h('div', { className: 'dsh-find-file-line' },
+            h('button', {
+              type: 'button', className: 'dsh-find-file-name',
+              title: item.name + ' — ' + t(available ? 'filesReveal' : 'filesUnavailable'),
+              'aria-disabled': !available || busy, 'aria-busy': busy || undefined,
+              onClick: available && !busy ? () => void revealFile(sessionId, item) : undefined,
+            }, item.name),
+            h('span', { className: 'dsh-find-speaker', 'data-speaker': item.speaker }, t(SPEAKER_LABELS[item.speaker])),
+          ),
+          reveal ? message(reveal, available && !busy) : null,
+        );
+      };
+
+      const renderSession = (session) => {
+        const id = session.sessionId;
+        const entry = files.sessions.get(id);
+        const open = files.sessionsOpen.has(id);
+        const items = shownItems(id);
+        const loading = entry?.status === 'loading' || (open && files.expanding && !entry);
+        return h(
+          'div', { key: id, className: 'dsh-find-session-block' },
+          h('button', {
+            type: 'button', className: 'dsh-find-session-row dsh-find-files-branch',
+            'aria-expanded': open, onClick: () => toggleFileSession(id),
+          },
+            h('span', { className: 'dsh-find-session-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
+            h('span', { className: 'dsh-find-session-title', 'data-archived': String(session.archived === true) }, session.title || id),
+            session.archived === true ? h('span', { className: 'dsh-find-archived' }, t('archivedBadge')) : null,
+            h('span', { className: 'dsh-find-session-state', 'data-status': entry?.status },
+              loading ? t('mediaReading')
+                : entry?.status === 'ready' ? t('filesCount', { count: items.length })
+                : entry?.status === 'error' ? t('filesSessionFailed') : '',
+            ),
+          ),
+          !open ? null : h(React.Fragment, null,
+            entry?.status === 'error' ? message('filesSessionFailed', true,
+              button('filesRetry', () => { if (filesScan !== null) void loadFileSession(filesScan, id); })) : null,
+            entry?.status !== 'ready' ? null : items.length === 0
+              ? message(entry.items.length > 0 ? 'filesFiltered' : 'filesEmpty')
+              : h('ul', { className: 'dsh-find-file-list' }, items.map((item) => renderItem(id, item))),
+            entry?.truncated ? message('filesTruncated') : null,
+          ),
+        );
+      };
+
+      const body = files.loading ? h('div', { className: 'dsh-find-body' },
+        h('div', { className: 'dsh-find-hint', role: 'status' },
+          h('span', { className: 'dsh-find-spinner', 'aria-hidden': 'true' }), t('mediaTreeLoading')),
+      ) : files.error ? h('div', { className: 'dsh-find-body' },
+        message('filesTreeFailed', true, button('filesRetry', rescanFiles)),
+      ) : workspaces.length === 0 ? h('div', { className: 'dsh-find-body' },
+        h('div', { className: 'dsh-find-hint' }, t('filesTreeEmpty')),
+      ) : h('div', { className: 'dsh-find-media-body' }, workspaces.map(({ workspace, sessions }, index) => {
+        const key = workspaceKey(workspace);
+        const open = files.workspacesOpen.has(key);
+        const count = counts[index];
+        return h('div', { key, className: 'dsh-find-card' },
+          h('button', {
+            type: 'button', className: 'dsh-find-card-head dsh-find-ws-head dsh-find-files-branch',
+            'aria-expanded': open, title: workspace.workspacePath || workspace.workspaceTitle,
+            onClick: () => toggleFileBranch('workspacesOpen', key),
+          },
+            h('span', { className: 'dsh-find-ws-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
+            h('span', { className: 'dsh-find-card-icon', 'aria-hidden': 'true' }, h('svg', {
+              width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+              strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+            }, h('path', { d: 'M3 7.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' }))),
+            h('span', { className: 'dsh-find-card-title' }, workspace.workspaceTitle || t('ungrouped')),
+            h('span', { className: 'dsh-find-card-count' },
+              t('mediaSessionCount', { count: count.sessions }) +
+                (count.files > 0 ? ' · ' + t('filesCount', { count: count.files }) : '')),
+          ),
+          open ? h('div', { className: 'dsh-find-ws-body' },
+            sessions.length === 0 ? message('mediaNoSessions') : sessions.map(renderSession),
+          ) : null,
+        );
+      }));
+
+      return h(React.Fragment, null, head, body,
+        h('div', { className: 'dsh-find-foot' }, h('span', { className: 'dsh-find-notice' }, t('filesHint'))),
+      );
+    }
+
     function Palette() {
       const state = useStore();
       const t = React.useMemo(makeT, []);
@@ -1140,7 +1496,7 @@ window.__ModuleLoader__.load({
       }, [state.open]);
 
       const payload = state.payload;
-      const tab = state.tab === 'media' ? 'media' : 'text';
+      const tab = state.tab;
       const mediaTree = state.mediaTree;
       const mediaWorkspaces = mediaTree !== null && Array.isArray(mediaTree.workspaces) ? mediaTree.workspaces : [];
       const mediaSpeakers = state.mediaSpeakers || {};
@@ -1317,6 +1673,7 @@ window.__ModuleLoader__.load({
           [
             { key: 'text', labelKey: 'tabText' },
             { key: 'media', labelKey: 'tabMedia' },
+            { key: 'files', labelKey: 'tabFiles' },
           ].map((entry) =>
             h(
               'button',
@@ -1855,9 +2212,9 @@ window.__ModuleLoader__.load({
                   : summary,
               ),
                 )
-              : renderMediaHead(),
-            tab === 'text' ? body : renderMediaBody(),
-            renderFoot(),
+              : tab === 'media' ? renderMediaHead() : null,
+            tab === 'files' ? h(FilesPanel, { files: state.files, t }) : tab === 'text' ? body : renderMediaBody(),
+            tab !== 'files' ? renderFoot() : null,
           ),
           renderPreview(),
           renderMenu(),

@@ -14,9 +14,11 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
-import { extname, join } from 'node:path';
+import { dirname, extname, join, posix, win32 } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const ROUTE_PREFIX = '/dsh-find';
 
@@ -915,6 +917,7 @@ function revealInExplorer(target, select) {
     /* Explorer is missing or refused; nothing else to do. */
   });
   child.unref();
+  return child;
 }
 
 function contentBlocksOf(event) {
@@ -1272,6 +1275,174 @@ async function buildMediaTree(ctx, signal) {
   };
 }
 
+/* ---------------------------------------------------------------- file tree */
+
+const FILES_PER_SESSION = 1000;
+const FILE_INDEX_LIMIT = 20000;
+const fileIndex = new Map();
+const FILE_MEDIA_EXTENSIONS = new Map([
+  ...Object.entries(MEDIA_TYPES).map(([ext, mime]) => [ext, mime.split('/')[0]]),
+  ...'.apng .avif .heic .heif .ico .jfif .jxl .tif .tiff .svg .svgz .dng .cr2 .nef .arw .psd'
+    .split(' ').map((ext) => [ext, 'image']),
+  ...'.3gp .3g2 .asf .flv .mpeg .mpg .mts .m2ts .ogv .rm .rmvb .vob .wmv'
+    .split(' ').map((ext) => [ext, 'video']),
+]);
+
+function fileKind(name, mediaType) {
+  if (typeof mediaType === 'string') {
+    if (mediaType.startsWith('image/')) return 'image';
+    if (mediaType.startsWith('video/')) return 'video';
+  }
+  return FILE_MEDIA_EXTENSIONS.get(extname(name).toLowerCase()) ?? 'file';
+}
+
+function fileFromPath(raw) {
+  if (typeof raw !== 'string' || !raw.trim() || /[\x00-\x1f]/.test(raw)) return null;
+  const windows = /^[a-z]:[\\/]/i.test(raw);
+  if (!windows && (!posix.isAbsolute(raw) || raw.startsWith('//'))) return null;
+  const pathApi = windows ? win32 : posix;
+  const path = pathApi.normalize(raw);
+  const name = pathApi.basename(path);
+  if (!name || /[\\/]$/.test(path)) return null;
+  return { key: 'path:' + (windows ? path.toLowerCase() : path), name, kind: fileKind(name),
+    target: windows && !/[<>:"|?*]/.test(path.slice(2)) ? { path, select: true } : null };
+}
+
+function fileFromAttachment(block, attachments) {
+  if (block?.type !== 'image' && block?.type !== 'file') return null;
+  const attachment = block.attachment;
+  if (typeof attachment?.attachmentId !== 'string') return null;
+  const hex = attachment.attachmentId.replace(/^sha256:/i, '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hex)) return null;
+  const image = block.type === 'image';
+  const name = typeof attachment.name === 'string' ? win32.basename(attachment.name) || hex : hex;
+  const locator = image ? 'imageHostPath' : 'fileHostPath';
+  let path;
+  if (typeof attachments?.[locator] === 'function') {
+    try { path = attachments[locator](attachment); } catch { /* Invalid durable reference */ }
+  } else if (image) {
+    path = join(dshHome(), ...ATTACHMENT_OBJECTS, hex.slice(0, 2), hex);
+  } else if (name === attachment.name && name !== '.' && name !== '..' && !/[<>:"|?*\x00-\x1f]/.test(name)) {
+    path = join(dshHome(), 'attachments', 'v1', 'files', hex.slice(0, 2), hex, name);
+  }
+  // Generic attachments have a separate named storage alias for each filename.
+  const key = image ? 'image:' + hex : 'file:' + hex + ':' + name;
+  return { key, name, kind: image ? 'image' : fileKind(name, attachment.mediaType),
+    target: typeof path === 'string' && /^[a-z]:[\\/]/i.test(path) ? { path, select: false } : null };
+}
+
+const FILE_OUTPUT_TOOLS = new Set(['write', 'draw_image', 'video_storyboard', 'video_zoom', 'video_subtitles']);
+
+function collectConversationFiles(events, attachments) {
+  const files = new Map();
+  const outputCalls = new Map();
+  const put = (item, speaker) => {
+    if (!item) return;
+    const previous = files.get(item.key);
+    if (previous?.speaker === 'user') return;
+    files.set(item.key, { ...item, speaker });
+  };
+  const putAttachments = (blocks, speaker) => {
+    if (Array.isArray(blocks)) for (const block of blocks) put(fileFromAttachment(block, attachments), speaker);
+  };
+  const putToolOutputs = (name, meta, blocks) => {
+    if (!FILE_OUTPUT_TOOLS.has(name)) return;
+    if ((name === 'write' && meta?.operation === 'create') || name === 'draw_image') {
+      const result = fileFromPath(meta?.path);
+      if (result) {
+        put(result, 'assistant');
+        if (name === 'draw_image') return; // The committed image preview is the same output.
+      }
+    }
+    putAttachments(blocks, 'assistant');
+  };
+  for (const event of events) {
+    const data = event?.data;
+    if (!data) continue;
+    switch (event.type) {
+      case 'user/message':
+        if (speakerOf(event.type, data) === 'user') putAttachments(contentBlocksOf(event), 'user');
+        break;
+      case 'assistant/message':
+        putAttachments(contentBlocksOf(event), 'assistant');
+        break;
+      case 'deliverables/presented':
+        if (Array.isArray(data.files)) {
+          for (const file of data.files) put(fileFromPath(file?.path), 'assistant');
+        }
+        break;
+      case 'tool/call':
+        if (FILE_OUTPUT_TOOLS.has(data.name) && typeof data.callId === 'string') outputCalls.set(data.callId, data.name);
+        break;
+      case 'tool/result': {
+        const callId = data.message?.toolCallId;
+        const name = outputCalls.get(callId);
+        outputCalls.delete(callId);
+        if (!data.message || data.message.isError || data.error) break;
+        putToolOutputs(name, data.meta, contentBlocksOf(event));
+        break;
+      }
+      case 'tool/ptc-dispatch':
+        if (data.isError !== false || data.error) break;
+        putToolOutputs(data.name, data.meta, data.content);
+        break;
+    }
+  }
+  return files;
+}
+
+async function runFilesSession(ctx, sessionId, signal) {
+  const { sessionQuery } = sessionLookup(ctx);
+  const snapshot = await sessionQuery.readSession(sessionId);
+  signal.throwIfAborted();
+  if (!Array.isArray(snapshot?.events) || snapshot.session?.origin === 'subagent') {
+    throw new Error('Conversation unavailable');
+  }
+  const files = collectConversationFiles(snapshot.events, ctx.get('attachments'));
+  const ordered = Array.from(files.values()).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const items = ordered.slice(0, FILES_PER_SESSION).map((item) => {
+    const id = createHash('sha256').update(JSON.stringify([sessionId, item.key])).digest('hex');
+    const canReveal = item.target !== null && process.platform === 'win32';
+    if (canReveal) {
+      fileIndex.delete(id);
+      fileIndex.set(id, item.target);
+    }
+    return { id, name: item.name, kind: item.kind, speaker: item.speaker, canReveal };
+  });
+  while (fileIndex.size > FILE_INDEX_LIMIT) fileIndex.delete(fileIndex.keys().next().value);
+  return { items, truncated: ordered.length > items.length };
+}
+
+async function serveFilesReveal(res, id) {
+  const entry = fileIndex.get(id);
+  if (!entry) return sendJson(res, 404, { error: 'unknown-file' });
+  if (process.platform !== 'win32') return sendJson(res, 501, { error: 'unavailable' });
+  let stat;
+  try {
+    stat = await fs.promises.stat(entry.path);
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return sendJson(res, 404, { error: 'not-found' });
+    return sendJson(res, 500, { error: 'reveal-failed' });
+  }
+  if (!stat.isFile()) return sendJson(res, 404, { error: 'not-found' });
+  try {
+    // Explorer parses commas and equals separately, even within one argv element.
+    // Keep non-ASCII characters literal, as the native DSH path opener does.
+    const target = pathToFileURL(entry.select ? entry.path : dirname(entry.path)).href
+      .replace(/(?:%[89A-F][0-9A-F])+/gi, (escaped) => decodeURIComponent(escaped))
+      .replaceAll(',', '%2C')
+      .replaceAll('=', '%3D');
+    const child = revealInExplorer(target, entry.select);
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    return sendJson(res, 200, { ok: true });
+  } catch {
+    return sendJson(res, 500, { error: 'reveal-failed' });
+  }
+}
+
 /** Reads exactly one conversation; this is what a click on it triggers. */
 async function runMediaSession(ctx, sessionId, signal) {
   const { sessionQuery, workspaceByPath, archivedIds } = sessionLookup(ctx);
@@ -1529,6 +1700,44 @@ async function handleRequest(ctx, req, res) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: 'media-failed', message });
+    }
+    return;
+  }
+
+  const filesRoute = path.startsWith(`${ROUTE_PREFIX}/files/`) ? path.slice(ROUTE_PREFIX.length + 7) : '';
+  if (filesRoute === 'tree' || filesRoute === 'session' || filesRoute === 'reveal') {
+    const method = filesRoute === 'reveal' ? 'POST' : 'GET';
+    if ((req.method ?? 'GET').toUpperCase() !== method) {
+      sendJson(res, 405, { error: 'method-not-allowed' });
+      return;
+    }
+    const id = params.get('id') ?? '';
+    if (filesRoute === 'reveal') {
+      if (req.headers?.['sec-fetch-site'] && req.headers['sec-fetch-site'] !== 'same-origin') {
+        sendJson(res, 403, { error: 'unavailable' });
+        return;
+      }
+      if (!/^[0-9a-f]{64}$/.test(id)) {
+        sendJson(res, 404, { error: 'unknown-file' });
+        return;
+      }
+      await serveFilesReveal(res, id);
+      return;
+    }
+    if (filesRoute === 'session' && !id) {
+      sendJson(res, 400, { error: 'bad-id' });
+      return;
+    }
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort();
+    });
+    try {
+      const payload = filesRoute === 'tree' ? await buildMediaTree(ctx, controller.signal)
+        : await runFilesSession(ctx, id, controller.signal);
+      if (!controller.signal.aborted) sendJson(res, 200, payload);
+    } catch {
+      if (!controller.signal.aborted) sendJson(res, 500, { error: 'files-' + filesRoute + '-failed' });
     }
     return;
   }
