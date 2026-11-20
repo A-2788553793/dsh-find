@@ -101,7 +101,7 @@ window.__ModuleLoader__.load({
         menuReveal: '打开文件所在位置',
         menuDelete: '删除',
         menuDeleteConfirm: '确认删除',
-        deleteProtected: '这是对话里的附件，删掉会让那段对话的图片永久失效，只能打开所在文件夹。',
+        deleteProtected: '作为附件的图片无法通过本插件删除',
         deleteFailed: '删除失败',
         deleted: '已删除 {name}',
         revealMissing: '文件已经不在原来的位置了',
