@@ -11,7 +11,7 @@ const flush = () => new Promise(setImmediate);
 
 // Mount the actual slot with a small React facade and a fetch that deliberately
 // delivers late responses even when aborted, so identity checks are exercised.
-function mount({ IntersectionObserver } = {}) {
+function mount({ IntersectionObserver, viewport = {} } = {}) {
   const requests = [];
   const fileTimers = new Map();
   let notifications = 0;
@@ -67,7 +67,7 @@ function mount({ IntersectionObserver } = {}) {
     });
   };
   runInNewContext(source, {
-    window: { __ModuleLoader__: { load: ({ factory }) => { plugin = factory(() => react); } }, innerWidth: 1200, innerHeight: 800, IntersectionObserver, setTimeout: setTimer },
+    window: { __ModuleLoader__: { load: ({ factory }) => { plugin = factory(() => react); } }, innerWidth: 1200, innerHeight: 800, IntersectionObserver, setTimeout: setTimer, ...viewport },
     document: { addEventListener(name, listen) { if (name === 'keydown') keydown = listen; } },
     navigator: { language: 'en' }, fetch, AbortController, URLSearchParams, console, setTimeout: setTimer, clearTimeout: (id) => fileTimers.delete(id),
   }, { filename: 'client.js' });
@@ -95,6 +95,10 @@ function mount({ IntersectionObserver } = {}) {
   };
   return {
     render, requests, find, click, byClass,
+    renderGrid(type, props, index) {
+      hook = 1000 + index * 10;
+      return type(props);
+    },
     filePanel: () => {
       const panel = find((node) => node.type.name === 'FilesPanel');
       return panel.type(panel.props);
@@ -128,6 +132,7 @@ function* walk(node) {
     for (const child of node) yield* walk(child);
   } else if (node && typeof node === 'object') {
     yield node;
+    if (node.type.name === 'MediaGrid') return yield* walk(node.type(node.props));
     for (const child of node.children || []) yield* walk(child);
   }
 }
@@ -520,4 +525,77 @@ test('image tiles load only nearby thumbnails and open the original even after a
   assert.equal(removed.attrs.has('src'), false);
   notify(far.node, true);
   assert.equal(far.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[1]));
+});
+
+
+test('media row window keeps fixed space, mounts successive groups, resizes, and opens originals', async () => {
+  let frame;
+  let scroll;
+  let disconnects = 0;
+  let resize;
+  let offset = 0;
+  let width = 544;
+  const root = {
+    clientTop: 0, clientHeight: 200,
+    getBoundingClientRect: () => ({ top: 40 }),
+    addEventListener(name, listener) { assert.equal(name, 'scroll'); scroll = listener; },
+    removeEventListener(name, listener) { assert.equal(listener, scroll); scroll = undefined; },
+  };
+  const ui = mount({ viewport: {
+    ResizeObserver: class {
+      constructor(callback) { assert.equal(resize, undefined); resize = callback; }
+      observe() {} unobserve() {} disconnect() { disconnects++; }
+    },
+    requestAnimationFrame(callback) { assert.equal(frame, undefined); frame = callback; return 1; },
+    cancelAnimationFrame() { frame = undefined; },
+  } });
+  await startMedia(ui, 'first', 'second');
+  await respond(await startBatch(ui), { items: [
+    ...Array.from({length: 400}, (_, i) => item('first', 'a' + i)),
+    ...Array.from({length: 400}, (_, i) => item('second', 'b' + i)),
+  ] });
+  // Isolate component hook slots, just as React gives each mounted grid its own state.
+  const groups = ui.render().children;
+  const raw = [];
+  function collect(node) {
+    if (Array.isArray(node)) return node.forEach(collect);
+    if (!node || typeof node !== 'object') return;
+    if (node.type.name === 'MediaGrid') raw.push(node);
+    else collect(node.children);
+  }
+  collect(groups);
+  assert.equal(raw.length, 2);
+  const before = raw.map(({ type, props }, i) => ui.renderGrid(type, props, i));
+  assert.ok(before.every(grid => grid.children.flat().length === 0));
+  const nodes = [0, 10300].map(top => ({
+    closest: () => root, get clientWidth() { return width; },
+    getBoundingClientRect: () => ({ top: 40 + top - offset }),
+  }));
+  before.forEach((grid, index) => grid.props.ref(nodes[index]));
+  const flushFrame = () => { const callback = frame; frame = undefined; callback(); };
+  const read = (index) => ui.renderGrid(raw[index].type, raw[index].props, index);
+  const titles = (grid) => grid.children.flat().map(tile => tile.props.title);
+  flushFrame();
+  const height = read(0).props.style.height;
+  assert.ok(titles(read(0)).includes('a0'));
+  assert.ok(titles(read(0)).length < 30);
+  assert.deepEqual(titles(read(1)), []);
+  offset = 5000;
+  scroll(); scroll(); flushFrame();
+  assert.ok(titles(read(0)).some(title => title === 'a200'));
+  assert.equal(titles(read(0)).includes('a0'), false);
+  assert.equal(read(0).props.style.height, height);
+  read(0).children.flat()[0].props.onClick();
+  assert.equal(ui.find(ui.byClass('dsh-find-preview-media')).props.src, '/mock/' + titles(read(0))[0]);
+  offset = 10310;
+  scroll(); flushFrame();
+  assert.ok(titles(read(1)).includes('b0'));
+  width = 414;
+  resize(); flushFrame();
+  assert.match(read(1).props.style.gridTemplateColumns, /repeat\(3,/);
+  assert.ok(read(1).props.style.height > height);
+  before.forEach(grid => grid.props.ref(null));
+  assert.equal(disconnects, 1);
+  assert.equal(scroll, undefined);
+  assert.equal(frame, undefined);
 });

@@ -292,6 +292,8 @@ window.__ModuleLoader__.load({
       '.dsh-find-refresh:disabled{opacity:.5;cursor:default;}',
       '.dsh-find-media-body{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 0 12px;}',
       '.dsh-find-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(124px,1fr));gap:8px;padding:10px 12px 12px;}',
+      '.dsh-find-media-grid[data-windowed]{box-sizing:border-box;align-content:start;}',
+      '.dsh-find-media-grid[data-windowed]>.dsh-find-tile{box-sizing:border-box;aspect-ratio:auto;overflow-anchor:none;}',
       '.dsh-find-tile{position:relative;display:block;aspect-ratio:4/3;border-radius:9px;overflow:hidden;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l1);cursor:pointer;transition:transform .12s ease,box-shadow .12s ease;}',
       '.dsh-find-tile:hover{transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.14);}',
       '.dsh-find-tile[data-archived="true"]{opacity:.7;}',
@@ -1607,6 +1609,94 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // Keep the CSS grid geometry and the row-window calculation in sync.
+    const MEDIA_GRID = { minWidth: 124, gap: 8, inset: 12, top: 10, bottom: 12 };
+    const mediaWindows = new WeakMap();
+
+    function watchMediaGrid(grid, count, publish) {
+      const root = grid.closest('.dsh-find-media-body');
+      if (root === null) {
+        publish({ first: 0, last: count });
+        return () => {};
+      }
+      let windowing = mediaWindows.get(root);
+      if (windowing === undefined) {
+        const grids = new Map();
+        let frame = null;
+        function update() {
+          frame = null;
+          const bounds = root.getBoundingClientRect();
+          const viewportTop = bounds.top + root.clientTop;
+          const viewportHeight = root.clientHeight;
+          // Read geometry for every group before publishing any React updates.
+          const updates = [];
+          for (const [node, entry] of grids) {
+            const width = Math.max(0, node.clientWidth - MEDIA_GRID.inset * 2);
+            const columns = Math.max(1, Math.floor((width + MEDIA_GRID.gap) / (MEDIA_GRID.minWidth + MEDIA_GRID.gap)));
+            const rowHeight = Math.max(MEDIA_GRID.minWidth, (width - MEDIA_GRID.gap * (columns - 1)) / columns) * 3 / 4;
+            const stride = rowHeight + MEDIA_GRID.gap;
+            const rows = Math.ceil(entry.count / columns);
+            const height = MEDIA_GRID.top + MEDIA_GRID.bottom + rows * stride - MEDIA_GRID.gap;
+            const y = viewportTop - node.getBoundingClientRect().top - MEDIA_GRID.top;
+            // One window of lookahead in each direction, including fast scrolls.
+            const firstRow = Math.min(rows, Math.max(0, Math.floor((y - viewportHeight) / stride)));
+            const lastRow = Math.max(firstRow, Math.min(rows, Math.ceil((y + viewportHeight * 2) / stride)));
+            const next = { first: firstRow * columns, last: Math.min(entry.count, lastRow * columns),
+              top: MEDIA_GRID.top + firstRow * stride, height, columns, rowHeight };
+            const previous = entry.previous;
+            if (previous === null || Object.keys(next).some((key) => previous[key] !== next[key])) {
+              entry.previous = next;
+              updates.push([entry, next]);
+            }
+          }
+          for (const [entry, next] of updates) entry.publish(next);
+        }
+        function schedule() {
+          if (frame === null) frame = window.requestAnimationFrame(update);
+        }
+        const resize = new window.ResizeObserver(schedule);
+        resize.observe(root);
+        root.addEventListener('scroll', schedule, { passive: true });
+        windowing = { grids, resize, schedule, stop() {
+          if (frame !== null) window.cancelAnimationFrame(frame);
+          resize.disconnect();
+          root.removeEventListener('scroll', schedule);
+          mediaWindows.delete(root);
+        } };
+        mediaWindows.set(root, windowing);
+      }
+      windowing.grids.set(grid, { count, publish, previous: null });
+      windowing.resize.observe(grid);
+      windowing.schedule();
+      return () => {
+        windowing.resize.unobserve(grid);
+        windowing.grids.delete(grid);
+        if (windowing.grids.size === 0) windowing.stop();
+        else windowing.schedule();
+      };
+    }
+
+    function MediaGrid({ items, renderTile }) {
+      const supported = typeof window.ResizeObserver === 'function' && typeof window.requestAnimationFrame === 'function';
+      const [range, setRange] = React.useState(null);
+      const ref = React.useMemo(() => {
+        let stop;
+        return (node) => {
+          stop?.();
+          stop = node === null ? undefined : watchMediaGrid(node, items.length, setRange);
+        };
+      }, [items.length]);
+      const visible = !supported ? items : range === null ? [] : items.slice(range.first, range.last);
+      const fixed = supported && range?.height !== undefined;
+      return h('div', {
+        className: 'dsh-find-media-grid', ref: supported ? ref : undefined,
+        'data-windowed': fixed ? '' : undefined,
+        style: fixed ? { height: range.height, paddingTop: Math.min(range.top, range.height - MEDIA_GRID.bottom),
+          gridTemplateColumns: 'repeat(' + range.columns + ', minmax(' + MEDIA_GRID.minWidth + 'px, 1fr))',
+          gridAutoRows: range.rowHeight } : undefined,
+      }, visible.map(renderTile));
+    }
+
     function Palette() {
       const state = useStore();
       const t = React.useMemo(makeT, []);
@@ -2018,7 +2108,7 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'dsh-find-menu-error' }, entry.error)
             : null,
           shown.length > 0 && open
-            ? h('div', { className: 'dsh-find-media-grid' }, shown.map(renderTile))
+            ? h(MediaGrid, { items: shown, renderTile })
             : null,
         );
       };
