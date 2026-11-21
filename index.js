@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import { dirname, extname, join, posix, win32 } from 'node:path';
+import { pipeline } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 
 const ROUTE_PREFIX = '/dsh-find';
@@ -878,13 +879,6 @@ function mediaFromPath(raw) {
   if (!/^[A-Za-z]:\//.test(target)) return null;
   const mediaType = MEDIA_TYPES[extname(target).toLowerCase()];
   if (mediaType === undefined) return null;
-  let stat;
-  try {
-    stat = fs.statSync(target);
-  } catch (err) {
-    return null;
-  }
-  if (!stat.isFile() || stat.size > MEDIA_DEFAULTS.maxBytes) return null;
   const segments = target.split('/');
   return {
     id: 'file:' + target,
@@ -893,11 +887,41 @@ function mediaFromPath(raw) {
     name: segments[segments.length - 1] ?? target,
     path: target,
     mediaType,
-    bytes: stat.size,
     width: null,
     height: null,
     url: ROUTE_PREFIX + '/media/file?path=' + encodeURIComponent(target),
   };
+}
+
+/* A path has the same identity in every session, but its attribution and
+   position are session-local. Stat each identity once for this entire request. */
+async function readMediaSizes(groups, limit, signal) {
+  const paths = new Map();
+  for (const items of groups) {
+    for (const item of items.values()) {
+      if (item.source === 'file' && !paths.has(item.id)) paths.set(item.id, item.path);
+    }
+  }
+  const sizes = new Map();
+  await mapLimit(Array.from(paths), limit, async ([id, target]) => {
+    try {
+      const stat = await fs.promises.stat(target);
+      if (stat.isFile() && stat.size <= MEDIA_DEFAULTS.maxBytes) sizes.set(id, stat.size);
+    } catch {
+      /* A missing or inaccessible path does not make this session unreadable. */
+    }
+  }, signal);
+  signal?.throwIfAborted();
+  return sizes;
+}
+
+function availableMedia(items, sizes) {
+  const result = [];
+  for (const item of items.values()) {
+    if (item.source !== 'file') result.push(item);
+    else if (sizes.has(item.id)) result.push({ ...item, bytes: sizes.get(item.id) });
+  }
+  return result;
 }
 
 /* The Client may only act on media it was actually shown, so every served item
@@ -938,39 +962,8 @@ function contentBlocksOf(event) {
 }
 
 async function runMedia(ctx, options, signal) {
-  const sessionQuery = ctx.get('sessionQuery');
-  const registry = ctx.get('workspaceRegistry');
-  if (sessionQuery === undefined || sessionQuery === null) {
-    throw new Error('sessionQuery service is unavailable');
-  }
-
   const startedAt = Date.now();
-
-  const workspaces = (() => {
-    try {
-      return registry === undefined || registry === null ? [] : registry.list();
-    } catch (err) {
-      return [];
-    }
-  })();
-
-  const workspaceByPath = new Map();
-  const workspaceOrder = new Map();
-  workspaces.forEach((workspace, index) => {
-    const key = normalizePath(workspace.path);
-    if (key.length > 0) workspaceByPath.set(key, workspace);
-    workspaceOrder.set(workspace.id, index);
-  });
-
-  const archivedIds = (() => {
-    try {
-      const ids = registry?.archivedSessionIds;
-      if (ids === undefined || ids === null) return new Set();
-      return new Set(Array.from(ids, (id) => String(id)));
-    } catch (err) {
-      return new Set();
-    }
-  })();
+  const { sessionQuery, workspaceByPath, workspaceOrder, archivedIds } = sessionLookup(ctx);
 
   const records = await sessionQuery.listSessions(signal);
   const targets = records.filter((record) => {
@@ -981,82 +974,30 @@ async function runMedia(ctx, options, signal) {
   });
 
   const scanned = await mapLimit(targets, options.concurrency, async (record) => {
-    if (signal?.aborted) return null;
-
-    let events;
+    let snapshot;
     try {
-      const snapshot = await sessionQuery.readSession(record.header.id);
-      events = Array.isArray(snapshot?.events) ? snapshot.events : [];
-    } catch (err) {
+      snapshot = await sessionQuery.readSession(record.header.id);
+    } catch {
       return null;
     }
+    if (signal?.aborted) return null;
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+    const candidates = collectMediaFromEvents(events);
+    return candidates.size === 0 ? null : { record, candidates };
+  }, signal);
+  const candidates = scanned.filter((entry) => entry !== null);
+  const sizes = await readMediaSizes(candidates.map((entry) => entry.candidates), options.concurrency, signal);
+  const matched = [];
+  for (const { record, candidates: media } of candidates) {
+    const items = availableMedia(media, sizes);
+    if (items.length > 0) matched.push({ record, items });
+  }
 
-    const items = new Map();
-
-    for (const event of events) {
-      if (event === null || typeof event !== 'object') continue;
-      if (!SEARCHABLE_EVENT_TYPES.includes(event.type)) continue;
-      const blocks = contentBlocksOf(event);
-      if (blocks === null) continue;
-      const speaker = speakerOf(event.type, event.data) === 'user' ? 'user' : 'assistant';
-
-      for (const block of blocks) {
-        if (block === null || typeof block !== 'object') continue;
-
-        if (block.type === 'image') {
-          const item = mediaFromAttachment(block);
-          if (item === null) continue;
-          const existing = items.get(item.id);
-          if (existing !== undefined) {
-            if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
-            continue;
-          }
-          items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
-          continue;
-        }
-
-        /* Path mentions count for every message kind — a tool result is where
-           most produced videos and screenshots get reported. */
-        if (block.type !== 'text' || typeof block.text !== 'string') continue;
-        const matches = block.text.match(MEDIA_PATH_RE);
-        if (matches === null) continue;
-        for (const raw of matches) {
-          const item = mediaFromPath(raw);
-          if (item === null) continue;
-          const existing = items.get(item.id);
-          if (existing !== undefined) {
-            /* One file mentioned by both sides belongs to the human. */
-            if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
-            continue;
-          }
-          items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
-        }
-      }
-    }
-
-    if (items.size === 0) return null;
-    return { record, items: Array.from(items.values()) };
-  });
-
-  const matched = scanned.filter((entry) => entry !== null);
-
-  try {
-    const observations = await sessionQuery.readTitleSnapshots(
-      matched.map((entry) => entry.record.header.id),
-      signal,
-    );
-    const titles = new Map();
-    for (const observation of observations) {
-      if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
-        titles.set(observation.sessionId, observation.value.title.title);
-      }
-    }
-    for (const entry of matched) {
-      const title = titles.get(entry.record.header.id);
-      if (typeof title === 'string' && title.length > 0) entry.title = title;
-    }
-  } catch (err) {
-    /* titles are a nicety */
+  const titles = await readTitles(sessionQuery, matched.map((entry) => entry.record.header.id), signal);
+  signal?.throwIfAborted();
+  for (const entry of matched) {
+    const title = titles.get(entry.record.header.id);
+    if (typeof title === 'string' && title.length > 0) entry.title = title;
   }
 
   matched.sort((left, right) => {
@@ -1153,6 +1094,13 @@ function sessionLookup(ctx) {
 
 function collectMediaFromEvents(events) {
   const items = new Map();
+  const add = (item, speaker, event) => {
+    if (item === null) return;
+    const existing = items.get(item.id);
+    if (existing === undefined) items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
+    else if (speaker === 'user') existing.speaker = 'user';
+  };
+
   for (const event of events) {
     if (event === null || typeof event !== 'object') continue;
     if (!SEARCHABLE_EVENT_TYPES.includes(event.type)) continue;
@@ -1162,31 +1110,11 @@ function collectMediaFromEvents(events) {
 
     for (const block of blocks) {
       if (block === null || typeof block !== 'object') continue;
-
       if (block.type === 'image') {
-        const item = mediaFromAttachment(block);
-        if (item === null) continue;
-        const existing = items.get(item.id);
-        if (existing !== undefined) {
-          if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
-          continue;
-        }
-        items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
-        continue;
-      }
-
-      if (block.type !== 'text' || typeof block.text !== 'string') continue;
-      const matches = block.text.match(MEDIA_PATH_RE);
-      if (matches === null) continue;
-      for (const raw of matches) {
-        const item = mediaFromPath(raw);
-        if (item === null) continue;
-        const existing = items.get(item.id);
-        if (existing !== undefined) {
-          if (existing.speaker !== 'user' && speaker === 'user') existing.speaker = 'user';
-          continue;
-        }
-        items.set(item.id, { ...item, speaker, seq: event.seq, type: event.type });
+        add(mediaFromAttachment(block), speaker, event);
+      } else if (block.type === 'text' && typeof block.text === 'string') {
+        /* Tool results, like user and assistant messages, may contain paths. */
+        for (const raw of block.text.match(MEDIA_PATH_RE) ?? []) add(mediaFromPath(raw), speaker, event);
       }
     }
   }
@@ -1463,10 +1391,14 @@ async function runMediaSession(ctx, sessionId, signal) {
   }
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
   const header = snapshot?.session ?? { id: sessionId };
-  const items = Array.from(collectMediaFromEvents(events).values());
+  signal?.throwIfAborted();
+  const candidates = collectMediaFromEvents(events);
+  const sizes = await readMediaSizes([candidates], MEDIA_DEFAULTS.concurrency, signal);
+  const items = availableMedia(candidates, sizes);
 
   const workspace = workspaceByPath.get(normalizePath(header.cwd)) ?? null;
   const titles = await readTitles(sessionQuery, [sessionId], signal);
+  signal?.throwIfAborted();
   const enriched = items.map((item) => ({
     sessionId: header.id ?? sessionId,
     title: titles.get(sessionId) ?? null,
@@ -1497,65 +1429,96 @@ async function runMediaSession(ctx, sessionId, signal) {
   };
 }
 
-function sniffImageType(target) {
-  let handle = null;
+async function sniffImageType(target) {
   try {
-    handle = fs.openSync(target, 'r');
-    const head = Buffer.alloc(12);
-    const read = fs.readSync(handle, head, 0, 12, 0);
-    if (read >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
-      return 'image/png';
-    }
-    if (read >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
-    if (read >= 12 && head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') {
-      return 'image/webp';
-    }
-    if (read >= 3 && head.toString('ascii', 0, 3) === 'GIF') return 'image/gif';
-    if (read >= 2 && head[0] === 0x42 && head[1] === 0x4d) return 'image/bmp';
-    return 'application/octet-stream';
-  } catch (err) {
-    return 'application/octet-stream';
-  } finally {
-    if (handle !== null) {
-      try {
-        fs.closeSync(handle);
-      } catch (err) {
-        /* already closed */
+    const handle = await fs.promises.open(target, 'r');
+    try {
+      const head = Buffer.alloc(12);
+      const { bytesRead } = await handle.read(head, 0, head.length, 0);
+      if (bytesRead >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
+        return 'image/png';
       }
+      if (bytesRead >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
+      if (bytesRead >= 12 && head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') {
+        return 'image/webp';
+      }
+      if (bytesRead >= 3 && head.toString('ascii', 0, 3) === 'GIF') return 'image/gif';
+      if (bytesRead >= 2 && head[0] === 0x42 && head[1] === 0x4d) return 'image/bmp';
+    } finally {
+      await handle.close();
     }
+  } catch {
+    /* An unreadable signature falls back to binary. */
   }
+  return 'application/octet-stream';
 }
 
-function streamFile(res, target, mediaType) {
+/* undefined = send the full representation; null = unsupported bytes range. */
+function mediaByteRange(header, size) {
+  if (header === undefined) return undefined;
+  if (typeof header !== 'string') return null;
+  const value = header.trim();
+  if (!/^bytes\s*=/i.test(value)) return undefined;
+  const match = /^bytes=([0-9]*)-([0-9]*)$/i.exec(value);
+  if (match === null || size === 0) return null;
+  const [, first, last] = match;
+  if (first === '') {
+    const suffix = Number(last);
+    return suffix > 0 ? { start: Math.max(0, size - suffix), end: size - 1 } : null;
+  }
+  const start = Number(first);
+  const end = last === '' ? size - 1 : Math.min(Number(last), size - 1);
+  return start < size && end >= start ? { start, end } : null;
+}
+
+async function streamFile(res, req, target, mediaType) {
   let stat;
   try {
-    stat = fs.statSync(target);
-  } catch (err) {
-    sendJson(res, 404, { error: 'not-found' });
+    stat = await fs.promises.stat(target);
+  } catch {
+    if (!res.destroyed) sendJson(res, 404, { error: 'not-found' });
     return;
   }
+  if (res.destroyed) return;
   if (!stat.isFile()) {
     sendJson(res, 404, { error: 'not-found' });
     return;
   }
-  if (stat.size > MEDIA_DEFAULTS.maxBytes) {
+  const size = stat.size;
+  if (size > MEDIA_DEFAULTS.maxBytes) {
     sendJson(res, 413, { error: 'too-large', max: MEDIA_DEFAULTS.maxBytes });
     return;
   }
-  res.writeHead(200, {
-    'content-type': mediaType,
-    'content-length': String(stat.size),
+  const method = (req.method ?? 'GET').toUpperCase();
+  // This route supplies no validators that could match If-Range.
+  const range = method === 'GET' && req.headers?.['if-range'] === undefined
+    ? mediaByteRange(req.headers?.range, size) : undefined;
+  if (range === null) {
+    res.writeHead(416, {
+      'accept-ranges': 'bytes',
+      'content-range': 'bytes */' + size,
+      'content-length': '0',
+      'cache-control': 'no-store',
+    });
+    res.end();
+    return;
+  }
+  const type = mediaType ?? await sniffImageType(target);
+  if (res.destroyed) return;
+  const headers = {
+    'content-type': type,
+    'content-length': String(range === undefined ? size : range.end - range.start + 1),
     'cache-control': 'private, max-age=600',
-  });
-  const stream = fs.createReadStream(target);
-  stream.on('error', () => {
-    try {
-      res.destroy();
-    } catch (nested) {
-      /* the socket is already gone */
-    }
-  });
-  stream.pipe(res);
+    'accept-ranges': 'bytes',
+  };
+  if (range !== undefined) headers['content-range'] = 'bytes ' + range.start + '-' + range.end + '/' + size;
+  res.writeHead(range === undefined ? 200 : 206, headers);
+  if (method === 'HEAD') {
+    res.end();
+    return;
+  }
+  // pipeline destroys the source on a premature ServerResponse close.
+  pipeline(fs.createReadStream(target, range), res, () => {});
 }
 
 function serveAttachment(res, req) {
@@ -1565,7 +1528,7 @@ function serveAttachment(res, req) {
     return;
   }
   const target = join(dshHome(), ...ATTACHMENT_OBJECTS, hex.slice(0, 2), hex);
-  streamFile(res, target, sniffImageType(target));
+  return streamFile(res, req, target);
 }
 
 function serveMediaFile(res, req) {
@@ -1575,7 +1538,7 @@ function serveMediaFile(res, req) {
     sendJson(res, 415, { error: 'unsupported-media' });
     return;
   }
-  streamFile(res, target, mediaType);
+  return streamFile(res, req, target, mediaType);
 }
 
 function serveMediaReveal(res, req) {
@@ -1702,8 +1665,9 @@ async function handleRequest(ctx, req, res) {
         { total: clampInt(params.get('total'), MEDIA_DEFAULTS.total, 1, 2000), concurrency: MEDIA_DEFAULTS.concurrency },
         controller.signal,
       );
-      sendJson(res, 200, payload);
+      if (!controller.signal.aborted && !res.destroyed) sendJson(res, 200, payload);
     } catch (err) {
+      if (controller.signal.aborted || res.destroyed) return;
       const message = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: 'media-failed', message });
     }
@@ -1773,8 +1737,10 @@ async function handleRequest(ctx, req, res) {
       if (!res.writableEnded) controller.abort();
     });
     try {
-      sendJson(res, 200, await runMediaSession(ctx, sessionId, controller.signal));
+      const payload = await runMediaSession(ctx, sessionId, controller.signal);
+      if (!controller.signal.aborted && !res.destroyed) sendJson(res, 200, payload);
     } catch (err) {
+      if (controller.signal.aborted || res.destroyed) return;
       const message = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: 'media-session-failed', message });
     }
@@ -1782,13 +1748,11 @@ async function handleRequest(ctx, req, res) {
   }
 
   if (path === `${ROUTE_PREFIX}/media/attachment`) {
-    serveAttachment(res, req);
-    return;
+    return serveAttachment(res, req);
   }
 
   if (path === `${ROUTE_PREFIX}/media/file`) {
-    serveMediaFile(res, req);
-    return;
+    return serveMediaFile(res, req);
   }
 
   if (path === `${ROUTE_PREFIX}/media/reveal`) {

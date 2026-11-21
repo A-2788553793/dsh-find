@@ -11,8 +11,18 @@ const flush = () => new Promise(setImmediate);
 
 // Mount the actual slot with a small React facade and a fetch that deliberately
 // delivers late responses even when aborted, so identity checks are exercised.
-function mount() {
+function mount({ IntersectionObserver } = {}) {
   const requests = [];
+  const fileTimers = new Map();
+  let notifications = 0;
+  let timerId = 0;
+  let activeFiles = 0;
+  let peakFiles = 0;
+  const setTimer = (run, delay) => {
+    const id = ++timerId;
+    if (delay === 16) fileTimers.set(id, run);
+    return id;
+  };
   const hooks = [];
   const effects = [];
   let hook = 0;
@@ -35,7 +45,7 @@ function mount() {
     useMemo,
     useState(initial) {
       const box = useMemo(() => ({ value: initial }), []);
-      return [box.value, (value) => { box.value = value; }];
+      return [box.value, (value) => { notifications++; box.value = value; }];
     },
     useEffect(fn, deps) {
       useMemo(() => { effects.push(fn); }, deps);
@@ -46,13 +56,20 @@ function mount() {
     if (path === '/dsh-find/settings') return Promise.resolve({ ok: false });
     const url = new URL(path, 'http://test.local');
     return new Promise((resolve, reject) => {
-      requests.push({ key: url.pathname.slice('/dsh-find'.length), id: url.searchParams.get('id'), signal: options.signal, resolve, reject });
+      const key = url.pathname.slice('/dsh-find'.length);
+      const isFile = key === '/files/session';
+      if (isFile) peakFiles = Math.max(peakFiles, ++activeFiles);
+      requests.push({
+        key, id: url.searchParams.get('id'), signal: options.signal,
+        resolve: (value) => { if (isFile) activeFiles--; resolve(value); },
+        reject: (error) => { if (isFile) activeFiles--; reject(error); },
+      });
     });
   };
   runInNewContext(source, {
-    window: { __ModuleLoader__: { load: ({ factory }) => { plugin = factory(() => react); } }, innerWidth: 1200, innerHeight: 800, setTimeout() {} },
+    window: { __ModuleLoader__: { load: ({ factory }) => { plugin = factory(() => react); } }, innerWidth: 1200, innerHeight: 800, IntersectionObserver, setTimeout: setTimer },
     document: { addEventListener(name, listen) { if (name === 'keydown') keydown = listen; } },
-    navigator: { language: 'en' }, fetch, AbortController, URLSearchParams, console, setTimeout() {}, clearTimeout() {},
+    navigator: { language: 'en' }, fetch, AbortController, URLSearchParams, console, setTimeout: setTimer, clearTimeout: (id) => fileTimers.delete(id),
   }, { filename: 'client.js' });
   plugin.apply({
     get() {},
@@ -78,6 +95,17 @@ function mount() {
   };
   return {
     render, requests, find, click, byClass,
+    filePanel: () => {
+      const panel = find((node) => node.type.name === 'FilesPanel');
+      return panel.type(panel.props);
+    },
+    fileMetrics: () => ({ notifications, activeFiles, peakFiles, timers: fileTimers.size }),
+    publishFiles: () => {
+      for (const [id, run] of [...fileTimers]) {
+        fileTimers.delete(id);
+        run();
+      }
+    },
     button: (label) => click(byText('button', label)),
     tab: (label) => click((node) => node.props.role === 'tab' && node.children.includes(label)),
     workspace: () => click(byClass('dsh-find-ws-head')),
@@ -278,4 +306,165 @@ test('newer manual reads and deletes win over in-flight batch results', async ()
   await respond(manual, { items: [{ ...gone, sessionId: 'manual' }, item('manual', 'fresh.png')] });
   assert.ok(ui.find((node) => node.props.title === 'fresh.png'));
   assert.equal(ui.find((node) => node.props.title === 'gone.png' || node.props.title === 'old.png'), undefined);
+});
+
+const filePanelClick = (ui, select) => {
+  const button = nodes(ui.filePanel()).find((node) => node.type === 'button' && select(node));
+  assert.ok(button, 'expected file panel button');
+  assert.notEqual(button.props.disabled, true);
+  button.props.onClick(event);
+};
+const fileButton = (ui, label) => filePanelClick(ui, (node) => node.children.includes(label));
+const fileRow = (ui, id) => filePanelClick(ui, (node) =>
+  ui.byClass('dsh-find-session-row')(node) && nodes(node).some((child) =>
+    ui.byClass('dsh-find-session-title')(child) && child.children.includes(id)));
+const fileWorkspace = (ui) => filePanelClick(ui, ui.byClass('dsh-find-ws-head'));
+const fileState = (ui, id) => ui.find((node) => node.type.name === 'FilesPanel').props.files.sessions.get(id);
+const filePayload = (id) => ({ items: [
+  { id, name: id + '.txt', speaker: 'user', kind: 'file', canReveal: true },
+], truncated: false });
+
+async function startFiles(ui, ...ids) {
+  ui.tab('Files');
+  await respond(ui.take('/files/tree'), tree(...ids));
+}
+
+test('file bulk load shares four slots with manual reads and retries, with manual priority', async () => {
+  const ui = mount();
+  await startFiles(ui, ...Array.from({ length: 10 }, (_, i) => 's' + i));
+  fileWorkspace(ui);
+  fileRow(ui, 's0');
+  const initial = ui.take('/files/session', 's0');
+  fileButton(ui, 'Expand all');
+  assert.deepEqual(ui.requests.map(({ id }) => id), ['s1', 's2', 's3']);
+  fileRow(ui, 's9');
+  fileRow(ui, 's9');
+  assert.equal(ui.fileMetrics().activeFiles, 4);
+  initial.reject(new Error('mock failed file read'));
+  await flush();
+  assert.equal(ui.requests.at(-1).id, 's9');
+  ui.publishFiles();
+  assert.equal(fileState(ui, 's0').status, 'error');
+  fileButton(ui, 'Retry');
+  assert.equal(ui.requests.length, 4);
+  await respond(ui.take('/files/session', 's1'), filePayload('s1'));
+  assert.equal(ui.requests.at(-1).id, 's0');
+  fileButton(ui, 'Collapse all');
+  for (const request of ui.requests.splice(0)) request.resolve({ ok: true, json: async () => filePayload(request.id) });
+  await flush();
+  ui.publishFiles();
+  assert.equal(ui.requests.length, 0);
+  assert.equal(fileState(ui, 's0').status, 'ready');
+  assert.equal(fileState(ui, 's9').status, 'ready');
+  assert.equal(fileState(ui, 's4'), undefined);
+  assert.equal(ui.fileMetrics().peakFiles, 4);
+});
+
+test('file rescan aborts old reads and shares their slots until they settle', async () => {
+  const ui = mount();
+  await startFiles(ui, 'same', 'old1', 'old2', 'old3', 'old4');
+  fileButton(ui, 'Expand all');
+  const old = ui.requests.splice(0);
+  assert.equal(old.length, 4);
+  fileButton(ui, 'Rescan');
+  assert.ok(old.every((request) => request.signal.aborted));
+  await respond(ui.take('/files/tree'), tree('same'));
+  fileWorkspace(ui);
+  fileRow(ui, 'same');
+  assert.equal(ui.requests.length, 0);
+  await respond(old.shift(), filePayload('stale'));
+  await respond(ui.take('/files/session', 'same'), filePayload('fresh'));
+  for (const request of old) request.resolve({ ok: true, json: async () => filePayload('stale') });
+  await flush();
+  ui.publishFiles();
+  assert.equal(fileState(ui, 'same').items[0].id, 'fresh');
+  assert.equal(fileState(ui, 'old1'), undefined);
+  assert.equal(ui.requests.length, 0);
+  assert.equal(ui.fileMetrics().peakFiles, 4);
+});
+
+test('1,000 file reads publish one snapshot per group instead of per request', async () => {
+  const ui = mount();
+  const ids = Array.from({ length: 1000 }, (_, i) => 's' + i);
+  await startFiles(ui, ...ids);
+  const before = ui.fileMetrics().notifications;
+  fileButton(ui, 'Expand all');
+  let loaded = 0;
+  const readIds = [];
+  while (loaded < ids.length) {
+    const group = ui.requests.splice(0);
+    assert.equal(group.length, 4);
+    for (const request of group) {
+      readIds.push(request.id);
+      request.resolve({ ok: true, json: async () => filePayload(request.id) });
+    }
+    await flush();
+    assert.equal(ui.fileMetrics().timers, 1);
+    ui.publishFiles();
+    loaded += group.length;
+  }
+  assert.deepEqual(readIds, ids);
+  assert.equal(ui.fileMetrics().peakFiles, 4);
+  assert.equal(ui.fileMetrics().notifications - before, 251);
+  assert.equal(fileState(ui, 's0').status, 'ready');
+  assert.equal(fileState(ui, 's999').status, 'ready');
+});
+
+test('video tiles share a scroller observer, defer src, and retain immediate playback on click', async () => {
+  const observers = [];
+  class IntersectionObserver {
+    constructor(notify, options) {
+      this.notify = (target, isIntersecting) => notify([{ target, isIntersecting }]);
+      this.options = options;
+      this.targets = new Set();
+      observers.push(this);
+    }
+    observe(target) { this.targets.add(target); }
+    unobserve(target) { this.targets.delete(target); }
+  }
+  const ui = mount({ IntersectionObserver });
+  await startMedia(ui, 'videos');
+  const batch = await startBatch(ui);
+  await respond(batch, { truncated: false, items: ['first', 'second', 'third'].map((id) => ({
+    ...item('videos', id), kind: 'video',
+  })) });
+  const thumbnails = nodes(ui.render()).filter((node) => node.type.name === 'VideoThumbnail');
+  const root = {};
+  const videos = thumbnails.map(({ type, props }) => {
+    const element = type(props);
+    assert.equal(element.props.src, undefined);
+    const attrs = new Map();
+    const video = {
+      attrs,
+      closest: (selector) => { assert.equal(selector, '.dsh-find-media-body'); return root; },
+      setAttribute: (key, value) => attrs.set(key, value),
+      hasAttribute: (key) => attrs.has(key),
+      removeAttribute: (key) => attrs.delete(key),
+      load: () => { video.unloaded = true; },
+    };
+    element.props.ref(video);
+    return { video, ref: element.props.ref };
+  });
+  assert.equal(videos.length, 3);
+  assert.equal(observers.length, 1);
+  const [observer] = observers;
+  const [first, second, third] = videos;
+  assert.equal(observer.options.root, root);
+  assert.ok(videos.every(({ video }) => !video.attrs.has('src')));
+  observer.notify(first.video, true);
+  observer.notify(second.video, false);
+  assert.equal(first.video.attrs.get('src'), '/mock/first');
+  assert.equal(second.video.attrs.has('src'), false);
+  ui.click((node) => ui.byClass('dsh-find-tile')(node) && node.props.title === 'second');
+  const preview = ui.find(ui.byClass('dsh-find-preview-media'));
+  assert.equal(preview.props.src, '/mock/second');
+  assert.equal(preview.props.controls, true);
+  assert.equal(preview.props.autoPlay, true);
+  third.ref(null);
+  observer.notify(third.video, true);
+  assert.equal(observer.targets.has(third.video), false);
+  assert.equal(third.video.attrs.has('src'), false);
+  first.ref(null);
+  assert.equal(first.video.attrs.has('src'), false);
+  assert.equal(first.video.unloaded, true);
 });

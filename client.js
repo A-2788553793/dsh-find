@@ -1037,8 +1037,9 @@ window.__ModuleLoader__.load({
 
     /* -------------------------------------------------------------- files */
 
-    // Every rescan owns its requests; late results cannot repopulate the new tree.
+    // A rescan owns its queue and writes; active slots are shared even across rescans.
     let filesScan = null;
+    let activeFileReads = 0;
 
     function setFiles(patch) {
       setStore({ files: { ...store.files, ...patch } });
@@ -1053,8 +1054,16 @@ window.__ModuleLoader__.load({
     }
 
     async function rescanFiles() {
-      if (filesScan !== null) filesScan.controller.abort();
-      const scan = { controller: new AbortController(), pending: new Map(), batch: null };
+      if (filesScan !== null) {
+        const previous = filesScan;
+        filesScan = null;
+        previous.controller.abort();
+        if (previous.publishTimer !== null) clearTimeout(previous.publishTimer);
+      }
+      const scan = {
+        controller: new AbortController(), pending: new Set(), manual: new Set(), batch: null,
+        changes: new Map(), publishTimer: null,
+      };
       filesScan = scan;
       setFiles({
         tree: null, loading: true, error: false, expanding: false,
@@ -1085,45 +1094,90 @@ window.__ModuleLoader__.load({
       return next.has(key);
     }
 
-    function updateFileSession(sessionId, entry) {
-      const sessions = new Map(store.files.sessions);
-      sessions.set(sessionId, entry);
-      setFiles({ sessions });
+    function scheduleFilePublish(scan) {
+      if (scan.publishTimer !== null) return;
+      // Publish nearby completions together rather than copying the entire Map per request.
+      scan.publishTimer = setTimeout(() => {
+        scan.publishTimer = null;
+        if (scan !== filesScan) return;
+        const patch = {};
+        if (scan.changes.size > 0) {
+          const sessions = new Map(store.files.sessions);
+          for (const [id, entry] of scan.changes) sessions.set(id, entry);
+          scan.changes.clear();
+          patch.sessions = sessions;
+        }
+        const expanding = scan.batch !== null;
+        if (store.files.expanding !== expanding) patch.expanding = expanding;
+        if (Object.keys(patch).length > 0) setFiles(patch);
+      }, 16);
+    }
+
+    function fileSessionEntry(scan, sessionId) {
+      return scan.changes.get(sessionId) ?? store.files.sessions.get(sessionId);
+    }
+
+    async function readFileSession(scan, sessionId) {
+      let entry;
+      try {
+        const response = await fetch(ROUTE + '/files/session?id=' + encodeURIComponent(sessionId), {
+          headers: { accept: 'application/json' }, cache: 'no-store', signal: scan.controller.signal,
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const payload = await response.json();
+        if (!Array.isArray(payload.items)) throw new Error('Invalid file items');
+        const items = payload.items.filter((item) => item && typeof item.id === 'string' && item.id !== '' &&
+          typeof item.name === 'string' && (item.speaker === 'user' || item.speaker === 'assistant') &&
+          (item.kind === 'image' || item.kind === 'video' || item.kind === 'file'));
+        entry = { status: 'ready', items, truncated: payload.truncated === true };
+      } catch (err) {
+        entry = { status: 'error' };
+      }
+      activeFileReads -= 1;
+      scan.pending.delete(sessionId);
+      if (scan === filesScan) {
+        scan.changes.set(sessionId, entry);
+        if (scan.batch !== null) {
+          scan.batch.remaining.delete(sessionId);
+          if (scan.batch.remaining.size === 0) scan.batch = null;
+        }
+        scheduleFilePublish(scan);
+      }
+      if (filesScan !== null) pumpFileReads(filesScan);
+    }
+
+    function pumpFileReads(scan) {
+      while (scan === filesScan && activeFileReads < FILES_CONCURRENCY) {
+        const id = scan.manual.values().next().value ?? scan.batch?.queued.values().next().value;
+        if (id === undefined) return;
+        scan.manual.delete(id);
+        scan.batch?.queued.delete(id);
+        scan.pending.add(id);
+        activeFileReads += 1;
+        if (fileSessionEntry(scan, id)?.status === 'error') {
+          scan.changes.set(id, { status: 'loading' });
+          scheduleFilePublish(scan);
+        }
+        void readFileSession(scan, id);
+      }
     }
 
     function loadFileSession(scan, sessionId) {
-      if (scan !== filesScan || store.files.sessions.get(sessionId)?.status === 'ready') return;
-      if (scan.pending.has(sessionId)) return scan.pending.get(sessionId);
-      updateFileSession(sessionId, { status: 'loading' });
-      const request = (async () => {
-        try {
-          const response = await fetch(ROUTE + '/files/session?id=' + encodeURIComponent(sessionId), {
-            headers: { accept: 'application/json' }, cache: 'no-store', signal: scan.controller.signal,
-          });
-          if (!response.ok) throw new Error('HTTP ' + response.status);
-          const payload = await response.json();
-          if (!Array.isArray(payload.items)) throw new Error('Invalid file items');
-          const items = payload.items.filter((item) => item && typeof item.id === 'string' && item.id !== '' &&
-            typeof item.name === 'string' && (item.speaker === 'user' || item.speaker === 'assistant') &&
-            (item.kind === 'image' || item.kind === 'video' || item.kind === 'file'));
-          if (scan === filesScan) {
-            updateFileSession(sessionId, { status: 'ready', items, truncated: payload.truncated === true });
-          }
-        } catch (err) {
-          if (scan === filesScan) updateFileSession(sessionId, { status: 'error' });
-        }
-      })().finally(() => scan.pending.delete(sessionId));
-      scan.pending.set(sessionId, request);
-      return request;
+      if (scan !== filesScan || scan.pending.has(sessionId) || scan.manual.has(sessionId) ||
+          fileSessionEntry(scan, sessionId)?.status === 'ready') return;
+      scan.manual.add(sessionId);
+      scan.changes.set(sessionId, { status: 'loading' });
+      scheduleFilePublish(scan);
+      pumpFileReads(scan);
     }
 
     function toggleFileSession(sessionId) {
       if (toggleFileBranch('sessionsOpen', sessionId) && filesScan !== null) {
-        void loadFileSession(filesScan, sessionId);
+        loadFileSession(filesScan, sessionId);
       }
     }
 
-    async function expandAllFiles() {
+    function expandAllFiles() {
       const files = store.files;
       const scan = filesScan;
       if (scan === null || scan.batch !== null || files.tree === null) return;
@@ -1132,28 +1186,17 @@ window.__ModuleLoader__.load({
         visibleFileSessions(files, workspace).map((session) => session.sessionId),
       ));
       if (sessionsOpen.size === 0) return;
-      const ids = [...sessionsOpen];
-      const batch = { cancelled: false };
-      scan.batch = batch;
-      setFiles({ expanding: true, workspacesOpen: new Set(workspaces.map(workspaceKey)), sessionsOpen });
-      let next = 0;
-      const worker = async () => {
-        while (!batch.cancelled && scan === filesScan && next < ids.length) {
-          const request = loadFileSession(scan, ids[next++]);
-          if (request) await request;
-        }
-      };
-      try {
-        await Promise.all(Array.from({ length: Math.min(FILES_CONCURRENCY, ids.length) }, worker));
-      } finally {
-        scan.batch = null;
-        if (scan === filesScan) setFiles({ expanding: false });
+      const remaining = new Set([...sessionsOpen].filter((id) => fileSessionEntry(scan, id)?.status !== 'ready'));
+      if (remaining.size > 0) {
+        scan.batch = { remaining, queued: new Set([...remaining].filter((id) => !scan.pending.has(id))) };
       }
+      setFiles({ expanding: scan.batch !== null, workspacesOpen: new Set(workspaces.map(workspaceKey)), sessionsOpen });
+      pumpFileReads(scan);
     }
 
     function collapseAllFiles() {
-      if (filesScan?.batch) filesScan.batch.cancelled = true;
-      setFiles({ workspacesOpen: new Set(), sessionsOpen: new Set() });
+      if (filesScan !== null) filesScan.batch = null;
+      setFiles({ expanding: false, workspacesOpen: new Set(), sessionsOpen: new Set() });
     }
 
     function setFileReveal(id, status) {
@@ -1498,6 +1541,55 @@ window.__ModuleLoader__.load({
       return item.speaker === 'user' ? 'user' : 'assistant';
     }
 
+    // Share one observer per media scroller. Off-screen video tiles have no src.
+    const videoObservers = new WeakMap();
+    function watchVideoThumbnail(video, url) {
+      const root = video.closest('.dsh-find-media-body');
+      if (typeof window.IntersectionObserver !== 'function' || root === null) {
+        video.setAttribute('src', url);
+        return () => {};
+      }
+      let watcher = videoObservers.get(root);
+      if (watcher === undefined) {
+        const sources = new Map();
+        const observer = new window.IntersectionObserver((entries) => {
+          for (const { target, isIntersecting } of entries) {
+            if (!isIntersecting || !sources.has(target)) continue;
+            const source = sources.get(target);
+            sources.delete(target);
+            observer.unobserve(target);
+            target.setAttribute('src', source);
+          }
+        }, { root, rootMargin: '160px 0px' });
+        watcher = { sources, observer };
+        videoObservers.set(root, watcher);
+      }
+      watcher.sources.set(video, url);
+      watcher.observer.observe(video);
+      return () => {
+        if (watcher.sources.delete(video)) watcher.observer.unobserve(video);
+      };
+    }
+
+    function VideoThumbnail({ url }) {
+      const ref = React.useMemo(() => {
+        let node = null;
+        let stop = null;
+        return (next) => {
+          if (node !== null) {
+            stop();
+            if (node.hasAttribute('src')) {
+              node.removeAttribute('src');
+              node.load();
+            }
+          }
+          node = next;
+          stop = next === null ? null : watchVideoThumbnail(next, url);
+        };
+      }, [url]);
+      return h('video', { className: 'dsh-find-thumb', ref, preload: 'metadata' });
+    }
+
     function Palette() {
       const state = useStore();
       const t = React.useMemo(makeT, []);
@@ -1838,7 +1930,7 @@ window.__ModuleLoader__.load({
             onContextMenu: (event) => openMediaMenu(item, event),
           },
           item.kind === 'video'
-            ? h('video', { className: 'dsh-find-thumb', src: item.url, preload: 'metadata' })
+            ? h(VideoThumbnail, { url: item.url })
             : h('img', { className: 'dsh-find-thumb', src: item.url, loading: 'lazy', alt: item.name }),
           h(
             'span',
