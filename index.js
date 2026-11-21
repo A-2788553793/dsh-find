@@ -1719,9 +1719,26 @@ async function loadThumbnail(id, target, signal) {
   return bytes;
 }
 
+function finishThumbnail(pending, error, bytes) {
+  // A timed-out active job can finish after another request for the same key.
+  if (thumbnailPending.get(pending.key) !== pending) return;
+  thumbnailPending.delete(pending.key);
+  for (const reply of pending.waiters) reply(error, bytes);
+  pending.waiters.clear();
+}
+
+function removeQueuedThumbnail(pending) {
+  const job = pending.queued;
+  clearTimeout(job.timer);
+  thumbnailQueue.splice(thumbnailQueue.indexOf(job), 1);
+  pending.queued = null;
+}
+
 function pumpThumbnails() {
   while (thumbnailActive < THUMBNAIL.concurrency && thumbnailQueue.length > 0) {
     const job = thumbnailQueue.shift();
+    const { pending } = job;
+    pending.queued = null;
     clearTimeout(job.timer);
     thumbnailActive += 1;
     const controller = new AbortController();
@@ -1730,9 +1747,12 @@ function pumpThumbnails() {
     const timeout = setTimeout(() => {
       const error = new ThumbnailError(504, 'thumbnail-timeout');
       controller.abort(error);
-      job.reject(error);
+      finishThumbnail(pending, error);
     }, THUMBNAIL.decodeMs + 1000);
-    loadThumbnail(job.id, job.target, controller.signal).then(job.resolve, job.reject).finally(() => {
+    loadThumbnail(job.id, job.target, controller.signal).then(
+      (bytes) => finishThumbnail(pending, undefined, bytes),
+      (error) => finishThumbnail(pending, error),
+    ).finally(() => {
       clearTimeout(timeout);
       thumbnailActive -= 1;
       pumpThumbnails();
@@ -1740,30 +1760,43 @@ function pumpThumbnails() {
   }
 }
 
-async function requestThumbnail(id, target) {
+async function requestThumbnail(id, target, signal) {
+  signal.throwIfAborted();
   const key = JSON.stringify([id, target]);
   let pending = thumbnailPending.get(key);
   if (pending === undefined) {
     if (thumbnailQueue.length >= THUMBNAIL.queueItems) throw new ThumbnailError(503, 'thumbnail-busy');
-    const promise = new Promise((resolve, reject) => {
-      const job = { id, target, resolve, reject, timer: setTimeout(() => {
-        const index = thumbnailQueue.indexOf(job);
-        if (index !== -1) thumbnailQueue.splice(index, 1);
-        reject(new ThumbnailError(503, 'thumbnail-busy'));
-      }, THUMBNAIL.queueMs) };
-      thumbnailQueue.push(job);
-      pumpThumbnails();
-    }).finally(() => thumbnailPending.delete(key));
-    pending = { promise, waiters: 0 };
+    pending = { key, queued: null, waiters: new Set() };
+    const job = { id, target, pending, timer: setTimeout(() => {
+      removeQueuedThumbnail(pending);
+      finishThumbnail(pending, new ThumbnailError(503, 'thumbnail-busy'));
+    }, THUMBNAIL.queueMs) };
+    pending.queued = job;
     thumbnailPending.set(key, pending);
+    thumbnailQueue.push(job);
   }
-  if (pending.waiters >= THUMBNAIL.waitersPerItem) throw new ThumbnailError(503, 'thumbnail-busy');
-  pending.waiters += 1;
-  try {
-    return await pending.promise;
-  } finally {
-    pending.waiters -= 1;
-  }
+  if (pending.waiters.size >= THUMBNAIL.waitersPerItem) throw new ThumbnailError(503, 'thumbnail-busy');
+  const promise = new Promise((resolve, reject) => {
+    const reply = (error, bytes) => {
+      signal.removeEventListener('abort', onAbort);
+      if (error === undefined) resolve(bytes);
+      else reject(error);
+    };
+    const onAbort = () => {
+      pending.waiters.delete(reply);
+      reply(signal.reason);
+      // A shared job still serves other requests. Let running work drain even
+      // if none remain; only a job still in the queue is safe to remove here.
+      if (pending.waiters.size === 0 && pending.queued !== null) {
+        removeQueuedThumbnail(pending);
+        finishThumbnail(pending, signal.reason);
+      }
+    };
+    pending.waiters.add(reply);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  pumpThumbnails();
+  return promise;
 }
 
 async function serveMediaThumbnail(res, req, params) {
@@ -1777,8 +1810,14 @@ async function serveMediaThumbnail(res, req, params) {
   if (entry === undefined) return sendJson(res, 404, { error: 'unknown-media' });
   if (entry.kind !== 'image') return sendJson(res, 415, { error: 'unsupported-image' });
   const target = thumbnailTarget(entry);
+  if (res.destroyed) return;
+  const controller = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) controller.abort();
+  };
+  res.once('close', onClose);
   try {
-    const bytes = await requestThumbnail(id, target);
+    const bytes = await requestThumbnail(id, target, controller.signal);
     if (res.destroyed) return;
     const latest = mediaIndex.get(id);
     if (latest?.kind !== 'image' || thumbnailTarget(latest) !== target) {
@@ -1795,6 +1834,8 @@ async function serveMediaThumbnail(res, req, params) {
     if (res.destroyed) return;
     const known = err instanceof ThumbnailError;
     sendJson(res, known ? err.status : 422, { error: known ? err.message : 'thumbnail-decode-failed' });
+  } finally {
+    res.off('close', onClose);
   }
 }
 

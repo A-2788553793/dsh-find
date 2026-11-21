@@ -36,7 +36,7 @@ function png(width, height, red, alpha) {
   return Buffer.concat([pngSignature, pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(pixels)), pngChunk('IEND', Buffer.alloc(0))]);
 }
 
-async function mount(t) {
+async function mount(t, inspectRequest) {
   const home = await fs.promises.mkdtemp(join(os.tmpdir(), 'dsh-thumbnail-'));
   const oldHome = process.env.DSH_HOME;
   const oldPath = process.env.PATH;
@@ -66,7 +66,10 @@ async function mount(t) {
   };
   apply({ get: (key) => key === 'sessionQuery' ? sessionQuery : undefined,
     webServer: { register: (value) => { route = value; } } });
-  const server = createServer(route.handler);
+  const server = createServer((req, res) => {
+    inspectRequest?.(req, res);
+    route.handler(req, res);
+  });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   const req = (path, options) => fetch('http://127.0.0.1:' + server.address().port + prefix + path, options);
@@ -205,6 +208,83 @@ test('distinct IDs share two active slots and a bounded waiting queue', { timeou
   assert.equal(results.filter((response) => response.status === 503).length, 1);
   assert.equal(results.filter((response) => response.status === 415).length, 26);
   assert.equal(peak, 2);
+});
+
+test('disconnect frees only orphaned waiting jobs and preserves shared and active work', { timeout: 10000 }, async (t) => {
+  const arrivals = new Map();
+  const { input, show, thumb } = await mount(t, (req, res) => {
+    const tag = new URL(req.url, 'http://localhost').searchParams.get('testTag');
+    arrivals.get(tag)?.(new Promise((resolve) => res.once('close', () => resolve())));
+  });
+  const images = await Promise.all(Array.from({ length: 28 }, (_, i) => input(60 + i, Buffer.from('not an image'))));
+  await show();
+
+  let nextTag = 0;
+  const request = (i) => {
+    const controller = new AbortController();
+    const tag = String(++nextTag);
+    // Do not resolve directly with the close promise: arrival must resolve first.
+    const arrived = new Promise((resolve) => arrivals.set(tag, (closed) => resolve({ closed })));
+    const done = thumb(images[i].id, '&testTag=' + tag, { signal: controller.signal }).catch((err) => err);
+    return { controller, arrived, done };
+  };
+  const abort = async ({ controller, arrived, done }) => {
+    const { closed } = await arrived;
+    controller.abort();
+    assert.equal((await done).name, 'AbortError');
+    await closed;
+  };
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const realStat = fs.promises.lstat;
+  const statTargets = [];
+  let active = 0;
+  let peak = 0;
+  t.mock.method(fs.promises, 'lstat', async (target, ...args) => {
+    statTargets.push(target);
+    peak = Math.max(peak, ++active);
+    try {
+      await gate;
+      return await realStat(target, ...args);
+    } finally {
+      active -= 1;
+    }
+  });
+
+  const originals = [request(0), request(1)];
+  const waiting = Array.from({ length: 24 }, (_, i) => request(i + 2));
+  const sharedRunning = request(0);
+  const sharedWaiting = request(2);
+  let newRequest, rejoined;
+  try {
+    await Promise.all([...originals, ...waiting, sharedRunning, sharedWaiting].map((r) => r.arrived));
+    await expectError(await thumb(images[26].id), 503, 'thumbnail-busy');
+    assert.equal(active, 2);
+    await abort(originals[0]);
+    await abort(waiting[0]);
+    await expectError(await thumb(images[26].id), 503, 'thumbnail-busy');
+    assert.equal(active, 2, 'a disconnected waiter does not cancel active shared work');
+
+    await abort(waiting[1]);
+    newRequest = request(26);
+    await newRequest.arrived;
+    await expectError(await thumb(images[27].id), 503, 'thumbnail-busy');
+    await abort(waiting[2]);
+    rejoined = request(4);
+    await rejoined.arrived;
+    await expectError(await thumb(images[27].id), 503, 'thumbnail-busy');
+    assert.equal(active, 2, 'the new work waits behind the two active jobs');
+  } finally {
+    release();
+  }
+  const rest = [originals[1], sharedRunning, sharedWaiting, ...waiting.slice(3), newRequest, rejoined];
+  await Promise.all(rest.map(async ({ done }) => expectError(await done, 415, 'unsupported-image')));
+  assert.equal(peak, 2);
+  assert.equal(statTargets.length, 26);
+  assert.equal(statTargets.filter((target) => target === images[0].target).length, 1);
+  assert.equal(statTargets.filter((target) => target === images[2].target).length, 1);
+  assert.equal(statTargets.filter((target) => target === images[3].target).length, 0);
+  assert.equal(statTargets.filter((target) => target === images[4].target).length, 1);
 });
 
 test('supports static JPEG, WebP, GIF and BMP as actual PNG thumbnails', { timeout: 20000 }, async (t) => {

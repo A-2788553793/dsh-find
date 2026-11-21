@@ -1598,12 +1598,145 @@ window.__ModuleLoader__.load({
       return h('video', { className: 'dsh-find-thumb', ref, preload: 'metadata' });
     }
 
+    const IMAGE_THUMB_CONCURRENCY = 4;
+    const IMAGE_THUMB_RETRY_MS = [250, 700, 1600];
+    const imageThumbnailObservers = new WeakMap();
+    const imageThumbnailQueue = new Set();
+    let activeImageThumbnails = 0;
+    let imagePumpScheduled = false;
+
+    function imageThumbDistance({ node, root }) {
+      if (root === null) return 0;
+      const image = node.getBoundingClientRect();
+      const viewport = root.getBoundingClientRect();
+      const top = viewport.top + root.clientTop;
+      return Math.max(0, top - image.bottom, image.top - (top + root.clientHeight));
+    }
+
+    function scheduleImageThumbnails() {
+      if (imagePumpScheduled) return;
+      imagePumpScheduled = true;
+      void Promise.resolve().then(() => {
+        imagePumpScheduled = false;
+        if (activeImageThumbnails >= IMAGE_THUMB_CONCURRENCY || imageThumbnailQueue.size === 0) return;
+        // Intersection callbacks can report a whole screen at once. Batch the
+        // dispatch, then rank using the current viewport, not callback order.
+        const ranked = Array.from(imageThumbnailQueue, (job) => [job, imageThumbDistance(job)]);
+        ranked.sort((left, right) => left[1] - right[1]);
+        for (const [job] of ranked) {
+          if (activeImageThumbnails >= IMAGE_THUMB_CONCURRENCY) break;
+          imageThumbnailQueue.delete(job);
+          if (!job.near) continue;
+          activeImageThumbnails += 1;
+          void readImageThumbnail(job);
+        }
+      });
+    }
+
+    async function readImageThumbnail(job) {
+      const controller = new AbortController();
+      job.controller = controller;
+      let retry = false;
+      try {
+        const response = await fetch(job.url, { signal: controller.signal, headers: { accept: 'image/png' } });
+        retry = response.status === 409 || response.status === 429 || response.status >= 500;
+        if (!response.ok) {
+          if (response.status === 503) {
+            const body = await response.json().catch(() => null);
+            if (body?.error === 'thumbnail-decoder-unavailable') retry = false;
+          }
+        } else {
+          const blob = await response.blob();
+          if (!job.stopped && !controller.signal.aborted) {
+            job.objectUrl = URL.createObjectURL(blob);
+            job.node.setAttribute('src', job.objectUrl);
+          }
+        }
+      } catch {
+        retry = !controller.signal.aborted;
+      } finally {
+        job.controller = null;
+        activeImageThumbnails -= 1;
+        if (!job.stopped && controller.signal.aborted) enqueueImageThumbnail(job);
+        else if (!job.stopped) {
+          const delay = IMAGE_THUMB_RETRY_MS[job.attempt++];
+          if (retry && delay !== undefined) {
+            job.timer = setTimeout(() => {
+              job.timer = null;
+              enqueueImageThumbnail(job);
+            }, delay);
+          } else {
+            job.done = true;
+            job.observer?.unobserve(job.node);
+          }
+        }
+        scheduleImageThumbnails();
+      }
+    }
+
+    function enqueueImageThumbnail(job) {
+      if (job.stopped || job.done || !job.near || job.controller !== null || job.timer !== null) return;
+      imageThumbnailQueue.add(job);
+      scheduleImageThumbnails();
+    }
+
+    function watchImageThumbnail(node, url) {
+      const root = node.closest('.dsh-find-media-body');
+      const job = { node, root, url, near: false, stopped: false, done: false, attempt: 0,
+        observer: null, controller: null, timer: null, objectUrl: null };
+      let jobs;
+      if (root !== null && typeof window.IntersectionObserver === 'function') {
+        let watcher = imageThumbnailObservers.get(root);
+        if (watcher === undefined) {
+          const jobsByNode = new Map();
+          const observer = new window.IntersectionObserver((entries) => {
+            for (const { target, isIntersecting } of entries) {
+              const entry = jobsByNode.get(target);
+              if (entry === undefined || entry.done) continue;
+              entry.near = isIntersecting;
+              if (isIntersecting) enqueueImageThumbnail(entry);
+              else {
+                imageThumbnailQueue.delete(entry);
+                entry.controller?.abort();
+              }
+            }
+          }, { root, rootMargin: '160px 0px' });
+          watcher = { jobs: jobsByNode, observer };
+          imageThumbnailObservers.set(root, watcher);
+        }
+        jobs = watcher.jobs;
+        job.observer = watcher.observer;
+        jobs.set(node, job);
+        job.observer.observe(node);
+      } else {
+        job.near = true;
+        enqueueImageThumbnail(job);
+      }
+      return () => {
+        job.stopped = true;
+        imageThumbnailQueue.delete(job);
+        jobs?.delete(node);
+        job.observer?.unobserve(node);
+        job.controller?.abort();
+        if (job.timer !== null) clearTimeout(job.timer);
+        if (job.objectUrl !== null) {
+          node.removeAttribute('src');
+          URL.revokeObjectURL(job.objectUrl);
+        }
+      };
+    }
+
     function ImageThumbnail({ id, name }) {
-      const url = ROUTE + '/media/thumbnail?id=' + encodeURIComponent(id);
-      const ref = useThumbnailRef(url, false);
+      const ref = React.useMemo(() => {
+        let stop;
+        return (node) => {
+          stop?.();
+          if (node !== null) node.removeAttribute('data-ready');
+          stop = node === null ? undefined : watchImageThumbnail(node, ROUTE + '/media/thumbnail?id=' + encodeURIComponent(id));
+        };
+      }, [id]);
       return h('img', {
-        className: 'dsh-find-thumb dsh-find-image-thumb', ref, alt: name,
-        loading: 'lazy', decoding: 'async',
+        className: 'dsh-find-thumb dsh-find-image-thumb', ref, alt: name, decoding: 'async',
         onLoad: (event) => event.currentTarget.setAttribute('data-ready', ''),
         onError: (event) => event.currentTarget.removeAttribute('data-ready'),
       });

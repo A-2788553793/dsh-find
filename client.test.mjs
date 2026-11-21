@@ -14,6 +14,8 @@ const flush = () => new Promise(setImmediate);
 function mount({ IntersectionObserver, viewport = {} } = {}) {
   const requests = [];
   const fileTimers = new Map();
+  const retryTimers = new Map();
+  const revoked = [];
   let notifications = 0;
   let timerId = 0;
   let activeFiles = 0;
@@ -21,6 +23,7 @@ function mount({ IntersectionObserver, viewport = {} } = {}) {
   const setTimer = (run, delay) => {
     const id = ++timerId;
     if (delay === 16) fileTimers.set(id, run);
+    if ([250, 700, 1600].includes(delay)) retryTimers.set(id, run);
     return id;
   };
   const hooks = [];
@@ -69,7 +72,8 @@ function mount({ IntersectionObserver, viewport = {} } = {}) {
   runInNewContext(source, {
     window: { __ModuleLoader__: { load: ({ factory }) => { plugin = factory(() => react); } }, innerWidth: 1200, innerHeight: 800, IntersectionObserver, setTimeout: setTimer, ...viewport },
     document: { addEventListener(name, listen) { if (name === 'keydown') keydown = listen; } },
-    navigator: { language: 'en' }, fetch, AbortController, URLSearchParams, console, setTimeout: setTimer, clearTimeout: (id) => fileTimers.delete(id),
+    URL: { createObjectURL: (blob) => 'blob:' + blob.id, revokeObjectURL: (url) => revoked.push(url) },
+    navigator: { language: 'en' }, fetch, AbortController, URLSearchParams, console, setTimeout: setTimer, clearTimeout: (id) => { fileTimers.delete(id); retryTimers.delete(id); },
   }, { filename: 'client.js' });
   plugin.apply({
     get() {},
@@ -94,7 +98,10 @@ function mount({ IntersectionObserver, viewport = {} } = {}) {
     node.props.onClick(event);
   };
   return {
-    render, requests, find, click, byClass,
+    render, requests, find, click, byClass, retryTimers, revoked,
+    advanceRetries() {
+      for (const [id, run] of [...retryTimers]) { retryTimers.delete(id); run(); }
+    },
     renderGrid(type, props, index) {
       hook = 1000 + index * 10;
       return type(props);
@@ -474,59 +481,88 @@ test('video tiles share a scroller observer, defer src, and retain immediate pla
   assert.equal(first.video.unloaded, true);
 });
 
-test('image tiles load only nearby thumbnails and open the original even after a thumbnail fails', async () => {
+test('image requests prioritize onscreen tiles, recover from busy, and preserve original previews', async () => {
   let notify;
   const targets = new Set();
   class IntersectionObserver {
     constructor(callback, options) {
       assert.equal(options.rootMargin, '160px 0px');
-      notify = (target, isIntersecting) => callback([{ target, isIntersecting }]);
+      notify = (entries) => callback(entries);
     }
     observe(node) { targets.add(node); }
     unobserve(node) { targets.delete(node); }
   }
   const ui = mount({ IntersectionObserver });
   await startMedia(ui, 'images');
-  const batch = await startBatch(ui);
-  const ids = ['att:abc', 'file:E:/图片/白 云.png', 'never mounted'];
-  await respond(batch, { items: ids.map((id) => item('images', id)) });
-  const root = {};
-  const images = nodes(ui.render()).filter((node) => node.type.name === 'ImageThumbnail').map(({ type, props }) => {
+  const ids = ['prefetch', 'att:abc', 'file:E:/图片/白 云.png', 'visible-c', 'visible-d', 'visible-e', 'far'];
+  await respond(await startBatch(ui), { items: ids.map((id) => item('images', id)) });
+  const root = { getBoundingClientRect: () => ({ top: 50 }), clientTop: 0, clientHeight: 640 };
+  const images = nodes(ui.render()).filter((node) => node.type.name === 'ImageThumbnail').map(({ type, props }, i) => {
     const { props: img } = type(props);
     assert.equal(img.src, undefined);
     assert.equal(img.decoding, 'async');
     const attrs = new Map();
-    const node = {
-      closest: () => root,
-      hasAttribute: (key) => attrs.has(key),
-      setAttribute: (key, value) => attrs.set(key, value),
-      removeAttribute: (key) => attrs.delete(key),
-    };
+    const top = i === 0 ? 760 : i === 6 ? 1500 : 70;
+    const node = { closest: () => root, getBoundingClientRect: () => ({ top, bottom: top + 100 }),
+      setAttribute: (key, value) => attrs.set(key, value), removeAttribute: (key) => attrs.delete(key) };
     img.ref(node);
     return { node, attrs, img };
   });
-  assert.equal(images.length, ids.length);
-  assert.equal(targets.size, ids.length);
-  const [near, far, removed] = images;
-  notify(near.node, true);
-  notify(far.node, false);
-  assert.equal(near.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[0]));
-  assert.equal(far.attrs.has('src'), false);
-  near.img.onLoad({ currentTarget: near.node });
-  assert.equal(near.attrs.has('data-ready'), true);
-  near.img.onError({ currentTarget: near.node });
-  assert.equal(near.attrs.has('data-ready'), false);
-  assert.equal(near.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[0]));
-  ui.click((node) => ui.byClass('dsh-find-tile')(node) && node.props.title === ids[0]);
-  assert.equal(ui.find(ui.byClass('dsh-find-preview-media')).props.src, '/mock/' + ids[0]);
-  removed.img.ref(null);
-  notify(removed.node, true);
-  assert.equal(targets.has(removed.node), false);
-  assert.equal(removed.attrs.has('src'), false);
-  notify(far.node, true);
-  assert.equal(far.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[1]));
+  notify(images.map(({ node }, i) => ({ target: node, isIntersecting: i !== 6 })));
+  await flush();
+  const thumbnail = '/media/thumbnail';
+  assert.deepEqual(ui.requests.map(r => r.id), ids.slice(1, 5));
+  const busy = ui.take(thumbnail, ids[1]);
+  busy.resolve({ ok: false, status: 503, json: async () => ({ error: 'thumbnail-busy' }) });
+  await flush();
+  assert.equal(ui.retryTimers.size, 1);
+  assert.equal(ui.requests.at(-1).id, ids[5]);
+  const missing = ui.take(thumbnail, ids[2]);
+  missing.resolve({ ok: false, status: 404 });
+  await flush();
+  assert.equal(ui.retryTimers.size, 1);
+  assert.equal(ui.requests.at(-1).id, ids[0]);
+  const removed = ui.take(thumbnail, ids[3]);
+  images[3].img.ref(null);
+  assert.equal(removed.signal.aborted, true);
+  removed.resolve({ ok: true, blob: async () => ({ id: 'removed' }) });
+  await flush();
+  assert.equal(images[3].attrs.has('src'), false);
+  const leaving = ui.take(thumbnail, ids[4]);
+  notify([{ target: images[4].node, isIntersecting: false }]);
+  assert.equal(leaving.signal.aborted, true);
+  notify([{ target: images[4].node, isIntersecting: true }]);
+  leaving.resolve({ ok: true, blob: async () => ({ id: 'left' }) });
+  await flush();
+  assert.equal(images[4].attrs.has('src'), false);
+  const returned = ui.take(thumbnail, ids[4]);
+  assert.equal(returned.signal.aborted, false);
+  returned.resolve({ ok: false, status: 503, json: async () => ({ error: 'thumbnail-decoder-unavailable' }) });
+  await flush();
+  assert.equal(ui.retryTimers.size, 1);
+  ui.advanceRetries();
+  await flush();
+  const recovered = ui.take(thumbnail, ids[1]);
+  recovered.resolve({ ok: true, blob: async () => ({ id: 'recovered' }) });
+  await flush();
+  assert.equal(images[1].attrs.get('src'), 'blob:recovered');
+  images[1].img.onLoad({ currentTarget: images[1].node });
+  assert.equal(images[1].attrs.has('data-ready'), true);
+  for (let retry = 0; retry <= 3; retry++) {
+    const transient = ui.take(thumbnail, ids[5]);
+    transient.resolve({ ok: false, status: 504 });
+    await flush();
+    assert.equal(ui.retryTimers.size, retry < 3 ? 1 : 0);
+    ui.advanceRetries();
+    await flush();
+  }
+  ui.click((node) => ui.byClass('dsh-find-tile')(node) && node.props.title === ids[2]);
+  assert.equal(ui.find(ui.byClass('dsh-find-preview-media')).props.src, '/mock/' + ids[2]);
+  for (const { img } of images) img.ref(null);
+  assert.deepEqual(ui.revoked, ['blob:recovered']);
+  assert.equal(targets.size, 0);
+  assert.equal(ui.retryTimers.size, 0);
 });
-
 
 test('media row window keeps fixed space, mounts successive groups, resizes, and opens originals', async () => {
   let frame;
