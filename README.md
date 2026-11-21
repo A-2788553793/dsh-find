@@ -99,7 +99,7 @@ plugin_manager install_bundle  <克隆下来的 dsh-find 目录>
 - 已归档对话的媒体照常列出，缩略图半透明并带红字「已归档」，排在卡片末尾/最底部；
   勾「隐藏已归档」可以不显示它们。
 - 标题旁有「用户 / AI」两个筛选标签，默认全亮，点一下只看另一边（纯前端过滤，不重新扫描）。
-- 图片接近可见区时才向本机请求小图；点卡片仍打开原图。
+- 图片和视频都只在接近可见区时加载：图片通过 `GET /dsh-find/media/thumbnail?id=` 加载小图（点卡片仍打开原图），视频按需加载预览并支持按字节范围拖动进度条；展开大量会话时，网格只渲染当前视窗附近的行。
   如果宿主没有 FFmpeg 或小图生成失败，卡片会保留占位和文件名，仍可以点击查看原图。
 - 视频显示 ▶ 角标，点开后可以直接播放。底栏显示已加载了多少媒体、涉及多少个对话。
 - **右键缩略图**弹出三项菜单：
@@ -139,10 +139,10 @@ plugin_manager install_bundle  <克隆下来的 dsh-find 目录>
 ## 实现
 
 - **Host 半**（`index.js`）：注册同源路由 `GET /dsh-find/search`、`GET /dsh-find/media`，
-  以及媒体文件回传 `GET /dsh-find/media/attachment`、`GET /dsh-find/media/file`，
+  以及媒体回传 `GET /dsh-find/media/attachment`、`GET /dsh-find/media/file`、`GET /dsh-find/media/thumbnail?id=`，
   以及懒加载用的 `GET /dsh-find/media/tree`（只列工作区/对话）、`GET /dsh-find/media/session?id=`（只读一个对话），
   以及右键菜单用的 `GET /dsh-find/media/reveal?id=`、`POST /dsh-find/media/delete?id=`
-（先 `GET /dsh-find/health` 可探活，返回 `version: 6`）。
+（先 `GET /dsh-find/health` 可探活，返回 `version: 8`）。
   搜索用 `ctx.sessionQuery`：
   - `listSessions()` 拿到全部会话（跳过 `origin === 'subagent'` 的子代理会话）；
   - 每个会话 `filterEvents(id, [{kind:'text', text}, {kind:'type', values:[...]}])` 先用索引判断有没有命中；
@@ -218,7 +218,9 @@ plugin_manager install_bundle  <克隆下来的 dsh-find 目录>
 ```
 
 `GET /dsh-find/media/file?path=<绝对路径>` 与 `GET /dsh-find/media/attachment?sha=<hex>`
-只接受媒体扩展名 / 64 位 hex，文件不存在返回 404，超过 600 MB 返回 413。
+只接受媒体扩展名 / 64 位 hex，支持单字节范围请求（`206` / `416`），文件不存在返回 404，超过 600 MB 返回 413。
+
+`GET /dsh-find/media/thumbnail?id=<媒体 ID>` 按需返回列表用的 PNG 缩略图（仅接受本次会话已列出过的图片 ID），带并发、排队与缓存上限。
 
 ### 文件接口
 
@@ -239,6 +241,21 @@ plugin_manager install_bundle  <克隆下来的 dsh-find 目录>
 - 「一键展开」可能需要读取多个对话日志；逐个展开只读选中的对话。结果缓存在面板里，切换标签不会重扫。
 
 ## 更新日志
+
+### 0.4.2
+
+相比 0.4.1 的改动：
+
+- **图片/视频页**：
+  - 列表图片改为按需加载真实 PNG 缩略图（新增 `GET /dsh-find/media/thumbnail?id=`），仅在接近可见区时请求并优先加载屏内图片；临时繁忙会自动重试，离开视窗取消未完成请求，后台跳过已断开的排队任务；点击卡片仍然查看原图。
+  - 网格按行虚拟滚动，展开全部会话时只渲染当前视窗附近的行并保留等高占位与滚动位置。
+  - 视频缩略图滚近可见区才加载；媒体文件与附件响应支持字节范围读取（`206` / `416`）并在连接断开时关闭文件流。
+  - 媒体扫描在同一请求内对重复路径先去重再限并发异步检查；客户端修正刷新、折叠和批量截断后的状态覆盖与误标。
+- **文件页**：
+  - 批量展开、单点展开与重试共用四路并发队列（单点操作优先），并合并状态更新以减少刷新次数。
+- **文本搜索与页签**：
+  - 搜索在请求取消后停止后续读取，单会话双栏满额时提前停止遍历，并仅对最终保留的会话查询标题。
+  - 切换页签时只计算当前可见页签的数据与界面元素。
 
 ### 0.4.1
 
