@@ -94,11 +94,11 @@ function buildSnippet(text, query, maxChars) {
   };
 }
 
-async function mapLimit(items, limit, run) {
+async function mapLimit(items, limit, run, signal) {
   const results = new Array(items.length);
   let cursor = 0;
   const workers = new Array(Math.max(1, Math.min(limit, items.length))).fill(null).map(async () => {
-    for (;;) {
+    while (!signal?.aborted) {
       const index = cursor;
       cursor += 1;
       if (index >= items.length) return;
@@ -291,7 +291,9 @@ async function runSearch(ctx, query, options, signal) {
     }
   })();
 
+  signal?.throwIfAborted();
   const records = await sessionQuery.listSessions(signal);
+  signal?.throwIfAborted();
   const targets = records.filter((record) => {
     const header = record.header;
     if (header === undefined || typeof header.id !== 'string') return false;
@@ -304,25 +306,22 @@ async function runSearch(ctx, query, options, signal) {
     { kind: 'type', values: SEARCHABLE_EVENT_TYPES },
   ];
 
-  let thinkingTruncated = false;
-  let conversationTruncated = false;
-
   const scanned = await mapLimit(targets, options.concurrency, async (record) => {
-    if (signal?.aborted) return null;
-
     let documents;
     try {
       documents = await sessionQuery.filterEvents(record.header.id, filters);
     } catch (err) {
       return null;
     }
-    if (!Array.isArray(documents) || documents.length === 0) return null;
+    if (signal?.aborted || !Array.isArray(documents) || documents.length === 0) return null;
 
     let events;
     try {
       const snapshot = await sessionQuery.readSession(record.header.id);
+      if (signal?.aborted) return null;
       events = Array.isArray(snapshot?.events) ? snapshot.events : [];
     } catch (err) {
+      if (signal?.aborted) return null;
       events = [];
     }
 
@@ -383,33 +382,15 @@ async function runSearch(ctx, query, options, signal) {
           ...built,
         });
       }
+      if (perChannel.thinking >= options.perSession && perChannel.conversation >= options.perSession) break;
     }
 
     if (hits.length === 0) return null;
     return { record, hits, occurrences: sumOccurrences(hits) };
-  });
+  }, signal);
+  signal?.throwIfAborted();
 
   const matched = scanned.filter((entry) => entry !== null);
-
-  try {
-    const observations = await sessionQuery.readTitleSnapshots(
-      matched.map((entry) => entry.record.header.id),
-      signal,
-    );
-    const titles = new Map();
-    for (const observation of observations) {
-      if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
-        titles.set(observation.sessionId, observation.value.title.title);
-      }
-    }
-    for (const entry of matched) {
-      const title = titles.get(entry.record.header.id);
-      if (typeof title === 'string' && title.length > 0) entry.title = title;
-    }
-  } catch (err) {
-    /* titles are a nicety; a failure here must not fail the search */
-  }
-
   matched.sort((left, right) => {
     const leftArchived = archivedIds.has(String(left.record.header.id)) ? 1 : 0;
     const rightArchived = archivedIds.has(String(right.record.header.id)) ? 1 : 0;
@@ -429,7 +410,10 @@ async function runSearch(ctx, query, options, signal) {
   });
 
   const flat = [];
+  const retainedIds = new Set();
   const counts = { thinking: 0, conversation: 0 };
+  let thinkingTruncated = false;
+  let conversationTruncated = false;
 
   for (const entry of matched) {
     const header = entry.record.header;
@@ -442,9 +426,10 @@ async function runSearch(ctx, query, options, signal) {
         continue;
       }
       counts[channel] += 1;
+      retainedIds.add(header.id);
       flat.push({
         sessionId: header.id,
-        title: entry.title ?? null,
+        title: null,
         workspaceId: workspace === null ? null : workspace.id,
         workspaceTitle: workspace === null ? null : workspace.title,
         workspacePath: workspace === null ? (header.cwd ?? null) : workspace.path,
@@ -454,6 +439,27 @@ async function runSearch(ctx, query, options, signal) {
         createdAt: header.createdAt,
         ...hit,
       });
+    }
+  }
+
+  signal?.throwIfAborted();
+  if (retainedIds.size > 0) {
+    try {
+      const observations = await sessionQuery.readTitleSnapshots([...retainedIds], signal);
+      signal?.throwIfAborted();
+      const titles = new Map();
+      for (const observation of observations) {
+        if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
+          titles.set(observation.sessionId, observation.value.title.title);
+        }
+      }
+      for (const hit of flat) {
+        const title = titles.get(hit.sessionId);
+        if (typeof title === 'string' && title.length > 0) hit.title = title;
+      }
+    } catch (err) {
+      signal?.throwIfAborted();
+      /* titles are a nicety; a failure here must not fail the search */
     }
   }
 
@@ -1816,6 +1822,7 @@ async function handleRequest(ctx, req, res) {
     return;
   }
 
+  if (res.destroyed) return;
   const rawQuery = (params.get('q') ?? '').trim();
   if (rawQuery.length === 0) {
     sendJson(res, 200, emptyPayload());
@@ -1835,16 +1842,20 @@ async function handleRequest(ctx, req, res) {
   };
 
   const controller = new AbortController();
-  res.on('close', () => {
+  const onClose = () => {
     if (!res.writableEnded) controller.abort();
-  });
+  };
+  res.once('close', onClose);
 
   try {
     const payload = await runSearch(ctx, rawQuery, options, controller.signal);
-    sendJson(res, 200, payload);
+    if (!controller.signal.aborted && !res.destroyed) sendJson(res, 200, payload);
   } catch (err) {
+    if (controller.signal.aborted || res.destroyed) return;
     const message = err instanceof Error ? err.message : String(err);
     sendJson(res, 500, { error: 'search-failed', message });
+  } finally {
+    res.off('close', onClose);
   }
 }
 

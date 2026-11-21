@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
         mediaReading: '读取中…',
         mediaReadFailed: '读取失败，点一下重试',
         mediaNone: '无',
+        mediaPartial: '仅显示部分，点击读取完整列表',
         mediaSessionCount: '{count} 个对话',
         mediaCountTwo: '{count} 个媒体 · {sessions} 个对话',
         mediaNoSessions: '这个工作区没有对话',
@@ -179,6 +180,7 @@ window.__ModuleLoader__.load({
         mediaReading: 'Reading…',
         mediaReadFailed: 'Read failed; click to retry',
         mediaNone: 'none',
+        mediaPartial: 'Partial results; click to load the full list',
         mediaSessionCount: '{count} conversations',
         mediaCountTwo: '{count} media · {sessions} conversations',
         mediaNoSessions: 'This workspace has no conversations',
@@ -689,7 +691,7 @@ window.__ModuleLoader__.load({
     function switchTab(tab) {
       if (tab !== 'text' && tab !== 'media' && tab !== 'files') return;
       setStore({ tab, preview: null, menu: null });
-      if (tab === 'media' && store.mediaTree === null && !store.mediaTreeLoading) void loadMediaTree();
+      if (tab === 'media' && store.mediaTree === null) void loadMediaTree();
       if (tab === 'files' && filesScan === null) void rescanFiles();
     }
 
@@ -699,31 +701,62 @@ window.__ModuleLoader__.load({
       setStore({ mediaSpeakers: next });
     }
 
-    /**
-     * The outline is cheap: workspaces and their conversation titles, no session
-     * log is read. Reading media stays an explicit action per conversation, so
-     * opening the tab never stalls the page.
-     */
-    async function loadMediaTree(force) {
-      if (store.mediaTreeLoading) return;
-      if (!force && store.mediaTree !== null) return;
-      setStore({ mediaTreeLoading: true, mediaTreeError: '' });
-      try {
-        const response = await fetch(ROUTE + '/media/tree', { headers: { accept: 'application/json' } });
-        if (!response.ok) {
-          const detail = await response.text().catch(() => '');
-          throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
-        }
-        const payload = await response.json();
-        setStore({ mediaTree: payload, mediaTreeLoading: false, mediaTreeError: '' });
-      } catch (err) {
-        if (err && err.name === 'AbortError') return;
-        setStore({
-          mediaTree: null,
-          mediaTreeLoading: false,
-          mediaTreeError: err instanceof Error ? err.message : String(err),
-        });
+    let mediaTreeRequest = null;
+    let mediaBatch = null;
+    const mediaSessionRequests = new Map();
+
+    async function fetchMediaJson(path, signal) {
+      const response = await fetch(ROUTE + path, { signal, headers: { accept: 'application/json' } });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
       }
+      return response.json();
+    }
+
+    /** The outline only lists workspaces and titles. Share an in-flight read. */
+    function loadMediaTree() {
+      if (mediaTreeRequest !== null) return mediaTreeRequest.promise;
+      if (store.mediaTree !== null) return Promise.resolve(store.mediaTree);
+      const request = { controller: new AbortController(), promise: null };
+      mediaTreeRequest = request;
+      request.promise = fetchMediaJson('/media/tree', request.controller.signal)
+        .then((tree) => {
+          if (mediaTreeRequest !== request) return null;
+          setStore({ mediaTree: tree, mediaTreeLoading: false, mediaTreeError: '' });
+          return tree;
+        })
+        .catch((err) => {
+          if (mediaTreeRequest === request) {
+            setStore({ mediaTree: null, mediaTreeLoading: false, mediaTreeError: err instanceof Error ? err.message : String(err) });
+          }
+          return null;
+        })
+        .finally(() => {
+          if (mediaTreeRequest === request) mediaTreeRequest = null;
+        });
+      setStore({ mediaTreeLoading: true, mediaTreeError: '' });
+      return request.promise;
+    }
+
+    function cancelMediaBatch() {
+      const previous = mediaBatch;
+      mediaBatch = null;
+      previous?.controller.abort();
+    }
+
+    function refreshMedia() {
+      cancelMediaBatch();
+      const previous = mediaTreeRequest;
+      mediaTreeRequest = null;
+      previous?.controller.abort();
+      const requests = [...mediaSessionRequests.values()];
+      mediaSessionRequests.clear();
+      for (const request of requests) request.controller.abort();
+      setStore({
+        mediaTree: null, expanding: false, sessionMedia: {}, expanded: {}, preview: null, menu: null,
+      });
+      return loadMediaTree();
     }
 
     function workspaceKey(workspace) {
@@ -734,6 +767,7 @@ window.__ModuleLoader__.load({
 
     function toggleWorkspace(workspace) {
       const key = workspaceKey(workspace);
+      mediaBatch?.touchedWorkspaces.add(key);
       const next = Object.assign({}, store.expanded || {});
       if (next[key] === true) delete next[key];
       else next[key] = true;
@@ -779,22 +813,17 @@ window.__ModuleLoader__.load({
       }, 6000);
     }
 
-    /** Removes one item from the loaded grid without re-reading the session. */
+    /** Removes the same file from loaded grids and any outstanding scan result. */
     function dropMedia(item) {
-      const sessions = Object.assign({}, store.sessionMedia || {});
-      const entry = sessions[item.sessionId];
-      if (entry === undefined) return;
-      const items = (entry.items || []).filter((each) => each.id !== item.id);
-      sessions[item.sessionId] = Object.assign({}, entry, {
-        items,
-        counts: {
-          user: items.filter((each) => each.speaker === 'user').length,
-          assistant: items.filter((each) => each.speaker !== 'user').length,
-          image: items.filter((each) => each.kind === 'image').length,
-          video: items.filter((each) => each.kind === 'video').length,
-        },
-      });
-      setStore({ sessionMedia: sessions });
+      mediaBatch?.deletedIds.add(item.id);
+      for (const request of mediaSessionRequests.values()) request.deletedIds.add(item.id);
+      const sessions = { ...store.sessionMedia };
+      for (const [id, entry] of Object.entries(sessions)) {
+        if (!entry.items?.some((each) => each.id === item.id)) continue;
+        const items = entry.items.filter((each) => each.id !== item.id);
+        sessions[id] = { ...entry, items, counts: mediaCounts(items) };
+      }
+      setStore({ sessionMedia: sessions, preview: store.preview?.id === item.id ? null : store.preview });
     }
 
     async function revealMedia(item) {
@@ -893,119 +922,116 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function mediaCounts(items) {
+      const counts = { user: 0, assistant: 0, image: 0, video: 0 };
+      for (const item of items) {
+        counts[item.speaker === 'user' ? 'user' : 'assistant'] += 1;
+        if (item.kind === 'image' || item.kind === 'video') counts[item.kind] += 1;
+      }
+      return counts;
+    }
+
     function patchSession(sessionId, patch) {
-      const next = Object.assign({}, store.sessionMedia || {});
-      next[sessionId] = Object.assign({}, next[sessionId] || {}, patch);
+      const next = Object.assign({}, store.sessionMedia);
+      next[sessionId] = Object.assign({}, next[sessionId], patch);
       setStore({ sessionMedia: next });
     }
 
-    /**
-     * Folds every workspace and every conversation that was already read.
-     * The loaded items stay in memory, so unfolding is instant.
-     */
+    /** Fold the outline, retaining everything already loaded or manually requested. */
     function collapseAll() {
-      const current = store.sessionMedia || {};
+      cancelMediaBatch();
       const next = {};
-      for (const id of Object.keys(current)) {
-        next[id] = Object.assign({}, current[id], { open: false });
+      for (const [id, entry] of Object.entries(store.sessionMedia)) {
+        next[id] = { ...entry, open: false };
       }
-      setStore({ sessionMedia: next, expanded: {}, preview: null, menu: null });
+      setStore({ sessionMedia: next, expanded: {}, expanding: false, preview: null, menu: null });
     }
 
-    /** Reads exactly one conversation's media — the click that follows. */
-    async function loadSessionMedia(sessionId, force) {
-      const current = (store.sessionMedia || {})[sessionId];
-      if (current !== undefined && current.status === 'loading') return;
-      if (!force && current !== undefined && current.status === 'ready') return;
-      patchSession(sessionId, { status: 'loading', error: '' });
+    async function loadSessionMedia(sessionId) {
+      if (mediaSessionRequests.has(sessionId)) return;
+      const request = { controller: new AbortController(), deletedIds: new Set() };
+      mediaSessionRequests.set(sessionId, request);
+      mediaBatch?.touchedSessions.add(sessionId);
+      patchSession(sessionId, { status: 'loading', open: true, error: '' });
       try {
-        const response = await fetch(ROUTE + '/media/session?id=' + encodeURIComponent(sessionId), {
-          headers: { accept: 'application/json' },
-        });
-        if (!response.ok) {
-          const detail = await response.text().catch(() => '');
-          throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
-        }
-        const payload = await response.json();
-        patchSession(sessionId, {
-          status: 'ready',
-          items: Array.isArray(payload.items) ? payload.items : [],
-          counts: payload.counts || { user: 0, assistant: 0, image: 0, video: 0 },
-          tookMs: payload.tookMs || 0,
-          error: '',
-        });
+        const payload = await fetchMediaJson('/media/session?id=' + encodeURIComponent(sessionId), request.controller.signal);
+        if (mediaSessionRequests.get(sessionId) !== request) return;
+        const items = (Array.isArray(payload.items) ? payload.items : []).filter((item) => !request.deletedIds.has(item.id));
+        patchSession(sessionId, { status: 'ready', items, counts: mediaCounts(items), tookMs: payload.tookMs || 0, error: '' });
       } catch (err) {
-        if (err && err.name === 'AbortError') return;
+        if (mediaSessionRequests.get(sessionId) !== request) return;
         patchSession(sessionId, { status: 'error', error: err instanceof Error ? err.message : String(err) });
+      } finally {
+        if (mediaSessionRequests.get(sessionId) === request) mediaSessionRequests.delete(sessionId);
       }
     }
 
-    /**
-     * Clicking a conversation row either reads it for the first time or folds /
-     * unfolds the grid it already produced. Nothing is re-read on a fold.
-     */
     function toggleSessionMedia(sessionId) {
-      const entry = (store.sessionMedia || {})[sessionId];
-      if (entry === undefined || entry.status === 'error') {
-        void loadSessionMedia(sessionId, entry !== undefined);
+      const entry = store.sessionMedia[sessionId];
+      if (entry?.status === 'loading') return;
+      if (entry?.status !== 'ready') {
+        void loadSessionMedia(sessionId);
         return;
       }
-      if (entry.status !== 'ready') return;
+      mediaBatch?.touchedSessions.add(sessionId);
       patchSession(sessionId, { open: entry.open === false });
     }
 
-    /**
-     * "Expand all" is the old behaviour: one full scan, then every conversation
-     * is filled from the result. It stays opt-in because it reads every log.
-     */
+    /** Keep the batch opt-in: the Host still scans every conversation. */
     async function expandAll() {
-      if (store.mediaTree === null) void loadMediaTree();
-      if (store.expanding === true) return;
-      setStore({ expanding: true });
+      if (mediaBatch !== null) return;
+      const request = {
+        controller: new AbortController(),
+        touchedSessions: new Set(mediaSessionRequests.keys()),
+        touchedWorkspaces: new Set(),
+        deletedIds: new Set(),
+      };
+      mediaBatch = request;
+      setStore({ expanding: true, mediaTreeError: '' });
       try {
-        const response = await fetch(ROUTE + '/media?total=' + String(MEDIA_TOTAL), {
-          headers: { accept: 'application/json' },
-        });
-        if (!response.ok) {
-          const detail = await response.text().catch(() => '');
-          throw new Error('HTTP ' + response.status + (detail ? ' — ' + detail.slice(0, 200) : ''));
-        }
-        const payload = await response.json();
-        const items = Array.isArray(payload.items) ? payload.items : [];
+        const tree = await loadMediaTree();
+        if (mediaBatch !== request || tree === null) return;
+        const payload = await fetchMediaJson('/media?total=' + String(MEDIA_TOTAL), request.controller.signal);
+        if (mediaBatch !== request) return;
         const grouped = new Map();
-        for (const item of items) {
+        for (const item of Array.isArray(payload.items) ? payload.items : []) {
+          if (request.deletedIds.has(item.id)) continue;
           const list = grouped.get(item.sessionId);
           if (list === undefined) grouped.set(item.sessionId, [item]);
           else list.push(item);
         }
-        const sessions = {};
-        for (const [sessionId, list] of grouped) {
-          sessions[sessionId] = {
-            status: 'ready',
-            items: list,
-            counts: {
-              user: list.filter((item) => item.speaker === 'user').length,
-              assistant: list.filter((item) => item.speaker !== 'user').length,
-              image: list.filter((item) => item.kind === 'image').length,
-              video: list.filter((item) => item.kind === 'video').length,
-            },
-            tookMs: payload.tookMs || 0,
-            error: '',
-          };
-        }
-        const expanded = {};
-        for (const workspace of (store.mediaTree && store.mediaTree.workspaces) || []) {
-          expanded[workspaceKey(workspace)] = true;
+        const sessions = { ...store.sessionMedia };
+        const expanded = { ...store.expanded };
+        const partial = payload.truncated === true;
+        for (const workspace of tree.workspaces || []) {
+          const key = workspaceKey(workspace);
+          if (!request.touchedWorkspaces.has(key)) expanded[key] = true;
           for (const session of workspace.sessions) {
-            if (sessions[session.sessionId] === undefined) {
-              sessions[session.sessionId] = { status: 'ready', items: [], counts: { user: 0, assistant: 0, image: 0, video: 0 }, tookMs: 0, error: '' };
+            const id = session.sessionId;
+            if (request.touchedSessions.has(id)) continue;
+            const current = sessions[id];
+            const items = grouped.get(id);
+            if ((partial && items === undefined) || (current?.status === 'ready' && (partial || items === undefined))) {
+              // When capped, missing rows must remain eligible for a per-session read.
+              if (current !== undefined) sessions[id] = { ...current, open: true };
+              continue;
             }
+            const kept = items ?? [];
+            sessions[id] = {
+              status: partial ? 'partial' : 'ready', open: true, items: kept,
+              counts: mediaCounts(kept), tookMs: items === undefined ? 0 : (payload.tookMs || 0), error: '',
+            };
           }
         }
-        setStore({ sessionMedia: sessions, expanded, expanding: false, mediaTotals: payload });
+        setStore({ sessionMedia: sessions, expanded });
       } catch (err) {
-        if (err && err.name === 'AbortError') return;
-        setStore({ expanding: false, mediaTreeError: err instanceof Error ? err.message : String(err) });
+        if (mediaBatch !== request) return;
+        setStore({ mediaTreeError: err instanceof Error ? err.message : String(err) });
+      } finally {
+        if (mediaBatch === request) {
+          mediaBatch = null;
+          setStore({ expanding: false });
+        }
       }
     }
 
@@ -1301,15 +1327,7 @@ window.__ModuleLoader__.load({
         card.sessions.sort((left, right) => (left.archived ? 1 : 0) - (right.archived ? 1 : 0));
       }
       cards.sort((left, right) => (left.archivedOnly ? 1 : 0) - (right.archivedOnly ? 1 : 0));
-      const list = [];
-      for (const card of cards) {
-        for (const session of card.sessions) {
-          for (const hit of session.hits) list.push(hit);
-        }
-      }
-      let flat = 0;
-      for (const hit of list) hit.flatIndex = flat++;
-      return { cards, flat, list };
+      return { cards, flat: hits.length };
     }
 
     function Highlighted(props) {
@@ -1476,6 +1494,10 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function mediaSpeakerOf(item) {
+      return item.speaker === 'user' ? 'user' : 'assistant';
+    }
+
     function Palette() {
       const state = useStore();
       const t = React.useMemo(makeT, []);
@@ -1495,39 +1517,46 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, [state.open]);
 
-      const payload = state.payload;
-      const tab = state.tab;
-      const mediaTree = state.mediaTree;
-      const mediaWorkspaces = mediaTree !== null && Array.isArray(mediaTree.workspaces) ? mediaTree.workspaces : [];
-      const mediaSpeakers = state.mediaSpeakers || {};
-      const expandedMap = state.expanded || {};
-      const sessionMedia = state.sessionMedia || {};
-      const mediaSpeakerOf = (item) => (item.speaker === 'user' ? 'user' : 'assistant');
-      const shownMediaOf = (sessionId) => {
-        const entry = sessionMedia[sessionId];
-        if (entry === undefined || entry.status !== 'ready') return [];
-        const kept = (entry.items || []).filter((item) => mediaSpeakers[mediaSpeakerOf(item)] !== false);
-        return state.hideArchived === true ? kept.filter((item) => item.archived !== true) : kept;
-      };
-      const loadedSessions = Object.keys(sessionMedia).filter((id) => sessionMedia[id] && sessionMedia[id].status === 'ready');
-      const loadedMediaCount = loadedSessions.reduce((total, id) => total + shownMediaOf(id).length, 0);
-      const loaded = state.open ? flattenHits(payload) : [];
-      /* Archived conversations stay searchable; the toggle only hides them from
-         the two panes, it never changes what the Host scanned. */
-      const hits = state.hideArchived ? loaded.filter((hit) => hit.archived !== true) : loaded;
-      const split = splitHits(hits);
-      /* The right pane can show every side at once or any subset of them; the
-         thinking pane is entirely model reasoning and is never filtered. */
-      const speakers = state.speakers || {};
-      const speakerOf = (hit) => (SPEAKER_LABELS[hit.speaker] ? hit.speaker : 'assistant');
-      const shownConversation = split.conversation.filter((hit) => speakers[speakerOf(hit)] !== false);
-      const speakerHidden = split.conversation.length - shownConversation.length;
-      const grouped = {
-        thinking: groupHits(split.thinking),
-        conversation: groupHits(shownConversation),
-      };
+      const { payload, tab, mediaTree, mediaSpeakers, sessionMedia, speakers, hideArchived } = state;
+      const isText = state.open && tab === 'text';
+      const isMedia = state.open && tab === 'media';
+      const textView = React.useMemo(() => {
+        if (!isText) return null;
+        const loaded = flattenHits(payload);
+        // Archive and speaker filters change display only, not the Host scan.
+        const hits = hideArchived ? loaded.filter((hit) => hit.archived !== true) : loaded;
+        const split = splitHits(hits);
+        const shownConversation = split.conversation.filter((hit) => speakers[SPEAKER_LABELS[hit.speaker] ? hit.speaker : 'assistant'] !== false);
+        return {
+          hits,
+          hiddenArchived: loaded.length - hits.length,
+          speakerHidden: split.conversation.length - shownConversation.length,
+          grouped: { thinking: groupHits(split.thinking), conversation: groupHits(shownConversation) },
+        };
+      }, [isText, payload, hideArchived, speakers]);
+      const mediaView = React.useMemo(() => {
+        if (!isMedia) return null;
+        const shownBySession = new Map();
+        let loadedMediaCount = 0;
+        for (const [id, entry] of Object.entries(sessionMedia)) {
+          if (entry.status !== 'ready' && !Array.isArray(entry.items)) continue;
+          const shown = (entry.items || []).filter((item) =>
+            mediaSpeakers[mediaSpeakerOf(item)] !== false && (!hideArchived || item.archived !== true),
+          );
+          shownBySession.set(id, shown);
+          loadedMediaCount += shown.length;
+        }
+        return { shownBySession, loadedMediaCount };
+      }, [isMedia, sessionMedia, mediaSpeakers, hideArchived]);
 
       if (!state.open) return null;
+
+      const { grouped, speakerHidden } = textView || {};
+      const mediaWorkspaces = isMedia && Array.isArray(mediaTree?.workspaces) ? mediaTree.workspaces : [];
+      const expandedMap = state.expanded;
+      const loadedMediaCount = mediaView?.loadedMediaCount ?? 0;
+      const loadedSessions = mediaView?.shownBySession.size ?? 0;
+      const shownMediaOf = (sessionId) => mediaView.shownBySession.get(sessionId) || [];
 
       const renderSpeakerChips = () =>
         h(
@@ -1777,7 +1806,7 @@ window.__ModuleLoader__.load({
               className: 'dsh-find-refresh',
               title: t('mediaCollapseAllHint'),
               onClick: () => collapseAll(),
-              disabled: Object.keys(expandedMap).length === 0 && Object.keys(sessionMedia).length === 0,
+              disabled: !state.expanding && Object.keys(expandedMap).length === 0 && Object.keys(sessionMedia).length === 0,
             },
             t('mediaCollapseAll'),
           ),
@@ -1788,8 +1817,7 @@ window.__ModuleLoader__.load({
               className: 'dsh-find-refresh',
               title: t('mediaRefreshHint'),
               onClick: () => {
-                setStore({ sessionMedia: {}, expanded: {}, preview: null, menu: null });
-                void loadMediaTree(true);
+                void refreshMedia();
               },
               disabled: state.mediaTreeLoading === true,
             },
@@ -1837,11 +1865,13 @@ window.__ModuleLoader__.load({
             ? t('mediaReading')
             : status === 'error'
               ? t('mediaReadFailed')
-              : status === 'ready'
-                ? shown.length === 0
-                  ? t('mediaNone')
-                  : t('mediaCount', { count: shown.length })
-                : '';
+              : status === 'partial'
+                ? t('mediaPartial')
+                : status === 'ready'
+                  ? shown.length === 0
+                    ? t('mediaNone')
+                    : t('mediaCount', { count: shown.length })
+                  : '';
         return h(
           'div',
           { key: 's:' + session.sessionId, className: 'dsh-find-session-block' },
@@ -1986,8 +2016,8 @@ window.__ModuleLoader__.load({
             'span',
             { className: 'dsh-find-foot-right' },
             tab === 'media'
-              ? loadedSessions.length > 0
-                ? t('mediaLoadedTotal', { count: loadedMediaCount, sessions: loadedSessions.length })
+              ? loadedSessions > 0
+                ? t('mediaLoadedTotal', { count: loadedMediaCount, sessions: loadedSessions })
                 : ''
 
               : payload !== null && payload.totalHits > 0
@@ -2077,38 +2107,36 @@ window.__ModuleLoader__.load({
         );
       };
 
-      let standalone = null;
-      if (state.error) {
-        standalone = h('div', { className: 'dsh-find-error' }, t('failed', { message: state.error }));
-      } else if (state.query.trim().length === 0) {
-        standalone = h('div', { className: 'dsh-find-hint' }, t('empty'));
-      } else if (state.searched.trim().length === 0) {
-        standalone = h('div', { className: 'dsh-find-hint' }, t('ready'));
-      } else if (state.loading && hits.length === 0) {
-        standalone = h('div', { className: 'dsh-find-hint' }, t('searching'));
-      } else if (!state.loading && hits.length === 0 && payload !== null) {
-        const hiddenCount = state.hideArchived ? loaded.filter((hit) => hit.archived === true).length : 0;
-        standalone = h(
-          'div',
-          { className: 'dsh-find-hint' },
-          hiddenCount > 0 ? t('noResultsHidden', { count: hiddenCount }) : t('noResults'),
-        );
-      } else if (hits.length === 0) {
-        standalone = h('div', { className: 'dsh-find-hint' }, t('empty'));
-      }
+      const renderTextBody = () => {
+        const { hits, hiddenArchived } = textView;
+        let standalone = null;
+        if (state.error) {
+          standalone = h('div', { className: 'dsh-find-error' }, t('failed', { message: state.error }));
+        } else if (state.query.trim().length === 0) {
+          standalone = h('div', { className: 'dsh-find-hint' }, t('empty'));
+        } else if (state.searched.trim().length === 0) {
+          standalone = h('div', { className: 'dsh-find-hint' }, t('ready'));
+        } else if (state.loading && hits.length === 0) {
+          standalone = h('div', { className: 'dsh-find-hint' }, t('searching'));
+        } else if (!state.loading && hits.length === 0 && payload !== null) {
+          standalone = h(
+            'div',
+            { className: 'dsh-find-hint' },
+            hiddenArchived > 0 ? t('noResultsHidden', { count: hiddenArchived }) : t('noResults'),
+          );
+        } else if (hits.length === 0) {
+          standalone = h('div', { className: 'dsh-find-hint' }, t('empty'));
+        }
 
-      const body =
-        standalone !== null
+        return standalone !== null
           ? h('div', { className: 'dsh-find-body' }, standalone)
           : h('div', { className: 'dsh-find-panes' }, PANES.map((entry) => renderPane(entry.channel, entry.labelKey)));
+      };
 
-      const summary =
-        payload !== null && hits.length > 0
-          ? t('results', {
-              count: hits.length,
-              sessions: new Set(hits.map((hit) => hit.sessionId)).size,
-            })
-          : '';
+      const hits = textView?.hits;
+      const summary = hits?.length > 0
+        ? t('results', { count: hits.length, sessions: new Set(hits.map((hit) => hit.sessionId)).size })
+        : '';
 
       const onKeyDown = (event) => {
         if (event.key === 'Escape') {
@@ -2213,11 +2241,11 @@ window.__ModuleLoader__.load({
               ),
                 )
               : tab === 'media' ? renderMediaHead() : null,
-            tab === 'files' ? h(FilesPanel, { files: state.files, t }) : tab === 'text' ? body : renderMediaBody(),
+            tab === 'files' ? h(FilesPanel, { files: state.files, t }) : tab === 'text' ? renderTextBody() : renderMediaBody(),
             tab !== 'files' ? renderFoot() : null,
           ),
-          renderPreview(),
-          renderMenu(),
+          isMedia ? renderPreview() : null,
+          isMedia ? renderMenu() : null,
         ),
       );
     }
