@@ -296,6 +296,7 @@ window.__ModuleLoader__.load({
       '.dsh-find-tile:hover{transform:translateY(-1px);box-shadow:0 3px 10px rgba(0,0,0,.14);}',
       '.dsh-find-tile[data-archived="true"]{opacity:.7;}',
       '.dsh-find-thumb{width:100%;height:100%;object-fit:cover;display:block;background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-find-image-thumb:not([data-ready]){visibility:hidden;}',
       '.dsh-find-tile-badge{position:absolute;top:6px;left:6px;font-size:10.5px;font-weight:600;line-height:1.5;padding:0 6px;border-radius:999px;border:0.5px solid transparent;background:rgba(255,255,255,.86);color:#1f2328;}',
       '.dsh-find-tile-badge[data-speaker="user"]{border-color:rgba(59,130,246,.45);color:#2563eb;}',
       '.dsh-find-tile-badge[data-speaker="assistant"]{border-color:rgba(13,159,116,.45);color:#0d9f74;}',
@@ -1541,15 +1542,15 @@ window.__ModuleLoader__.load({
       return item.speaker === 'user' ? 'user' : 'assistant';
     }
 
-    // Share one observer per media scroller. Off-screen video tiles have no src.
-    const videoObservers = new WeakMap();
-    function watchVideoThumbnail(video, url) {
-      const root = video.closest('.dsh-find-media-body');
+    // Share one observer per media scroller. Off-screen thumbnails have no src.
+    const thumbnailObservers = new WeakMap();
+    function watchThumbnail(node, url) {
+      const root = node.closest('.dsh-find-media-body');
       if (typeof window.IntersectionObserver !== 'function' || root === null) {
-        video.setAttribute('src', url);
+        node.setAttribute('src', url);
         return () => {};
       }
-      let watcher = videoObservers.get(root);
+      let watcher = thumbnailObservers.get(root);
       if (watcher === undefined) {
         const sources = new Map();
         const observer = new window.IntersectionObserver((entries) => {
@@ -1562,17 +1563,17 @@ window.__ModuleLoader__.load({
           }
         }, { root, rootMargin: '160px 0px' });
         watcher = { sources, observer };
-        videoObservers.set(root, watcher);
+        thumbnailObservers.set(root, watcher);
       }
-      watcher.sources.set(video, url);
-      watcher.observer.observe(video);
+      watcher.sources.set(node, url);
+      watcher.observer.observe(node);
       return () => {
-        if (watcher.sources.delete(video)) watcher.observer.unobserve(video);
+        if (watcher.sources.delete(node)) watcher.observer.unobserve(node);
       };
     }
 
-    function VideoThumbnail({ url }) {
-      const ref = React.useMemo(() => {
+    function useThumbnailRef(url, isVideo) {
+      return React.useMemo(() => {
         let node = null;
         let stop = null;
         return (next) => {
@@ -1580,14 +1581,30 @@ window.__ModuleLoader__.load({
             stop();
             if (node.hasAttribute('src')) {
               node.removeAttribute('src');
-              node.load();
+              if (isVideo) node.load();
             }
           }
           node = next;
-          stop = next === null ? null : watchVideoThumbnail(next, url);
+          if (node !== null && !isVideo) node.removeAttribute('data-ready');
+          stop = next === null ? null : watchThumbnail(next, url);
         };
-      }, [url]);
+      }, [url, isVideo]);
+    }
+
+    function VideoThumbnail({ url }) {
+      const ref = useThumbnailRef(url, true);
       return h('video', { className: 'dsh-find-thumb', ref, preload: 'metadata' });
+    }
+
+    function ImageThumbnail({ id, name }) {
+      const url = ROUTE + '/media/thumbnail?id=' + encodeURIComponent(id);
+      const ref = useThumbnailRef(url, false);
+      return h('img', {
+        className: 'dsh-find-thumb dsh-find-image-thumb', ref, alt: name,
+        loading: 'lazy', decoding: 'async',
+        onLoad: (event) => event.currentTarget.setAttribute('data-ready', ''),
+        onError: (event) => event.currentTarget.removeAttribute('data-ready'),
+      });
     }
 
     function Palette() {
@@ -1931,7 +1948,7 @@ window.__ModuleLoader__.load({
           },
           item.kind === 'video'
             ? h(VideoThumbnail, { url: item.url })
-            : h('img', { className: 'dsh-find-thumb', src: item.url, loading: 'lazy', alt: item.name }),
+            : h(ImageThumbnail, { id: item.id, name: item.name }),
           h(
             'span',
             { className: 'dsh-find-tile-badge', 'data-speaker': mediaSpeakerOf(item) },

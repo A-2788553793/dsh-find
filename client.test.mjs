@@ -468,3 +468,56 @@ test('video tiles share a scroller observer, defer src, and retain immediate pla
   assert.equal(first.video.attrs.has('src'), false);
   assert.equal(first.video.unloaded, true);
 });
+
+test('image tiles load only nearby thumbnails and open the original even after a thumbnail fails', async () => {
+  let notify;
+  const targets = new Set();
+  class IntersectionObserver {
+    constructor(callback, options) {
+      assert.equal(options.rootMargin, '160px 0px');
+      notify = (target, isIntersecting) => callback([{ target, isIntersecting }]);
+    }
+    observe(node) { targets.add(node); }
+    unobserve(node) { targets.delete(node); }
+  }
+  const ui = mount({ IntersectionObserver });
+  await startMedia(ui, 'images');
+  const batch = await startBatch(ui);
+  const ids = ['att:abc', 'file:E:/图片/白 云.png', 'never mounted'];
+  await respond(batch, { items: ids.map((id) => item('images', id)) });
+  const root = {};
+  const images = nodes(ui.render()).filter((node) => node.type.name === 'ImageThumbnail').map(({ type, props }) => {
+    const { props: img } = type(props);
+    assert.equal(img.src, undefined);
+    assert.equal(img.decoding, 'async');
+    const attrs = new Map();
+    const node = {
+      closest: () => root,
+      hasAttribute: (key) => attrs.has(key),
+      setAttribute: (key, value) => attrs.set(key, value),
+      removeAttribute: (key) => attrs.delete(key),
+    };
+    img.ref(node);
+    return { node, attrs, img };
+  });
+  assert.equal(images.length, ids.length);
+  assert.equal(targets.size, ids.length);
+  const [near, far, removed] = images;
+  notify(near.node, true);
+  notify(far.node, false);
+  assert.equal(near.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[0]));
+  assert.equal(far.attrs.has('src'), false);
+  near.img.onLoad({ currentTarget: near.node });
+  assert.equal(near.attrs.has('data-ready'), true);
+  near.img.onError({ currentTarget: near.node });
+  assert.equal(near.attrs.has('data-ready'), false);
+  assert.equal(near.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[0]));
+  ui.click((node) => ui.byClass('dsh-find-tile')(node) && node.props.title === ids[0]);
+  assert.equal(ui.find(ui.byClass('dsh-find-preview-media')).props.src, '/mock/' + ids[0]);
+  removed.img.ref(null);
+  notify(removed.node, true);
+  assert.equal(targets.has(removed.node), false);
+  assert.equal(removed.attrs.has('src'), false);
+  notify(far.node, true);
+  assert.equal(far.attrs.get('src'), '/dsh-find/media/thumbnail?id=' + encodeURIComponent(ids[1]));
+});

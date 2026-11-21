@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
-import { dirname, extname, join, posix, win32 } from 'node:path';
+import { delimiter, dirname, extname, isAbsolute, join, posix, win32 } from 'node:path';
 import { pipeline } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 
@@ -932,11 +932,11 @@ const mediaIndex = new Map();
 function rememberMedia(item) {
   if (item === null || typeof item !== 'object' || typeof item.id !== 'string') return;
   if (item.source === 'attachment') {
-    mediaIndex.set(item.id, { source: 'attachment', hex: item.id.slice(4) });
+    mediaIndex.set(item.id, { source: 'attachment', hex: item.id.slice(4), kind: item.kind });
     return;
   }
   if (item.source === 'file' && typeof item.path === 'string') {
-    mediaIndex.set(item.id, { source: 'file', path: item.path });
+    mediaIndex.set(item.id, { source: 'file', path: item.path, kind: item.kind });
   }
 }
 
@@ -1541,6 +1541,263 @@ function serveMediaFile(res, req) {
   return streamFile(res, req, target, mediaType);
 }
 
+/* -------------------------------------------------------------- thumbnails */
+
+const THUMBNAIL = {
+  edge: 320,
+  sourceBytes: 24 * 1024 * 1024,
+  sourcePixels: 16 * 1024 * 1024,
+  outputBytes: 512 * 1024,
+  cacheBytes: 16 * 1024 * 1024,
+  cacheItems: 256,
+  concurrency: 2,
+  queueItems: 24,
+  waitersPerItem: 32,
+  queueMs: 5000,
+  decodeMs: 5000,
+};
+const thumbnailCache = new Map();
+let thumbnailCacheBytes = 0;
+const thumbnailPending = new Map();
+const thumbnailQueue = [];
+let thumbnailActive = 0;
+
+class ThumbnailError extends Error {
+  constructor(status, code) {
+    super(code);
+    this.status = status;
+  }
+}
+
+function thumbnailTarget(entry) {
+  if (entry.source === 'file') return entry.path;
+  return join(dshHome(), ...ATTACHMENT_OBJECTS, entry.hex.slice(0, 2), entry.hex);
+}
+
+function forgetThumbnail(id) {
+  const cached = thumbnailCache.get(id);
+  if (cached !== undefined) thumbnailCacheBytes -= cached.bytes.length;
+  thumbnailCache.delete(id);
+}
+
+function thumbnailStamp(stat) {
+  // Nanosecond timestamps + file identity detect path reuse, not just a new size.
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join(':');
+}
+
+async function thumbnailStat(target) {
+  const stat = await fs.promises.lstat(target, { bigint: true }).catch(() => null);
+  if (!stat?.isFile()) throw new ThumbnailError(404, 'not-found');
+  if (stat.size > THUMBNAIL.sourceBytes) throw new ThumbnailError(413, 'thumbnail-source-too-large');
+  return stat;
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+
+function thumbnailInput(head) {
+  // Pick a fixed, single-format demuxer and native decoder from bytes, not user text.
+  if (head.subarray(0, 8).equals(PNG_SIGNATURE)) return ['png_pipe', 'png'];
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return ['jpeg_pipe', 'mjpeg'];
+  if (head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') {
+    return head.toString('ascii', 12, 16) === 'VP8X' && (head[20] & 2) !== 0
+      ? ['webp_anim', 'webp_anim'] : ['webp_pipe', 'webp'];
+  }
+  if (['GIF87a', 'GIF89a'].includes(head.toString('ascii', 0, 6))) return ['gif', 'gif'];
+  if (head[0] === 0x42 && head[1] === 0x4d) return ['bmp_pipe', 'bmp'];
+  throw new ThumbnailError(415, 'unsupported-image');
+}
+
+async function thumbnailFfmpeg(signal) {
+  const binary = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  const candidates = [join(dshHome(), 'tools', 'ffmpeg', 'bin'),
+    ...(process.env.PATH ?? '').split(delimiter).map((dir) => dir.replace(/^"(.*)"$/, '$1'))];
+  // Never search the working directory implicitly (Windows also does this for spawn).
+  for (const dir of candidates) {
+    if (!isAbsolute(dir)) continue;
+    const target = join(dir, binary);
+    signal.throwIfAborted();
+    try {
+      await fs.promises.access(target, fs.constants.X_OK);
+      if ((await fs.promises.stat(target)).isFile()) return target;
+    } catch { /* try the next explicit directory */ }
+  }
+  throw new ThumbnailError(503, 'thumbnail-decoder-unavailable');
+}
+
+async function decodeThumbnail(handle, size, [format, codec], signal) {
+  const executable = await thumbnailFfmpeg(signal);
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const ratio = `min(1,${THUMBNAIL.edge}/max(iw,ih))`;
+    const child = spawn(executable, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-xerror',
+      '-max_alloc', '134217728', '-filter_threads', '1', '-threads', '1',
+      '-max_pixels', String(THUMBNAIL.sourcePixels),
+      '-protocol_whitelist', 'pipe', '-codec_whitelist', codec,
+      '-f', format, '-i', 'pipe:0', '-map', '0:v:0',
+      '-vf', `scale=w='max(1,floor(iw*${ratio}))':h='max(1,floor(ih*${ratio}))',setsar=1,format=rgba`,
+      '-frames:v', '1', '-threads', '1', '-c:v', 'png',
+      '-protocol_whitelist', 'pipe', '-f', 'image2pipe', 'pipe:1',
+    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    const chunks = [];
+    let written = 0;
+    let failure;
+    const stop = (error) => {
+      failure ??= error;
+      child.kill('SIGKILL');
+    };
+    child.on('error', () => { failure ??= new ThumbnailError(503, 'thumbnail-decoder-unavailable'); });
+    const timer = setTimeout(() => stop(new ThumbnailError(504, 'thumbnail-timeout')), THUMBNAIL.decodeMs);
+    child.stdout.on('error', () => stop(new ThumbnailError(422, 'thumbnail-decode-failed')));
+    child.stdout.on('data', (chunk) => {
+      written += chunk.length;
+      if (written > THUMBNAIL.outputBytes) stop(new ThumbnailError(422, 'thumbnail-output-too-large'));
+      else chunks.push(chunk);
+    });
+    // Stream at most the checked size (even if the file grows during decoding).
+    const source = handle.createReadStream({ start: 0, end: size - 1 });
+    const piped = new Promise((done) => pipeline(source, child.stdin, (err) => {
+      // A first-frame-only decode can close its input before EOF. Other read
+      // errors kill the child; an early close alone is not enough for success.
+      if (err && !['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE'].includes(err.code)) {
+        stop(new ThumbnailError(422, 'thumbnail-decode-failed'));
+      }
+      done();
+    }));
+    child.once('close', async (code) => {
+      clearTimeout(timer);
+      await piped;
+      if (failure !== undefined) return reject(failure);
+      if (code !== 0 || written === 0) {
+        return reject(new ThumbnailError(422, 'thumbnail-decode-failed'));
+      }
+      resolve(Buffer.concat(chunks, written));
+    });
+  });
+}
+
+async function loadThumbnail(id, target, signal) {
+  const initial = await thumbnailStat(target).catch((err) => {
+    forgetThumbnail(id);
+    throw err;
+  });
+  signal.throwIfAborted();
+  const stamp = thumbnailStamp(initial);
+  const cached = thumbnailCache.get(id);
+  forgetThumbnail(id);
+  if (cached?.target === target && cached.stamp === stamp) {
+    thumbnailCache.set(id, cached);
+    thumbnailCacheBytes += cached.bytes.length;
+    return cached.bytes;
+  }
+  if (initial.size === 0n) throw new ThumbnailError(415, 'unsupported-image');
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (fs.constants.O_NOFOLLOW ?? 0);
+  const handle = await fs.promises.open(target, flags).catch(() => null);
+  if (handle === null) throw new ThumbnailError(404, 'not-found');
+  let bytes;
+  try {
+    signal.throwIfAborted();
+    const current = await handle.stat({ bigint: true });
+    if (!current.isFile() || thumbnailStamp(current) !== stamp) throw new ThumbnailError(409, 'thumbnail-source-changed');
+    const head = Buffer.alloc(21);
+    const { bytesRead } = await handle.read(head, 0, head.length, 0);
+    signal.throwIfAborted();
+    bytes = await decodeThumbnail(handle, Number(current.size), thumbnailInput(head.subarray(0, bytesRead)), signal);
+  } finally {
+    await handle.close();
+  }
+  signal.throwIfAborted();
+  const final = await thumbnailStat(target);
+  signal.throwIfAborted();
+  if (thumbnailStamp(final) !== stamp) throw new ThumbnailError(409, 'thumbnail-source-changed');
+  forgetThumbnail(id);
+  thumbnailCache.set(id, { target, stamp, bytes });
+  thumbnailCacheBytes += bytes.length;
+  while (thumbnailCache.size > THUMBNAIL.cacheItems || thumbnailCacheBytes > THUMBNAIL.cacheBytes) {
+    forgetThumbnail(thumbnailCache.keys().next().value);
+  }
+  return bytes;
+}
+
+function pumpThumbnails() {
+  while (thumbnailActive < THUMBNAIL.concurrency && thumbnailQueue.length > 0) {
+    const job = thumbnailQueue.shift();
+    clearTimeout(job.timer);
+    thumbnailActive += 1;
+    const controller = new AbortController();
+    // If filesystem I/O stalls, answer on time but retain the slot until it
+    // actually drains. A stalled drive cannot create unlimited active work.
+    const timeout = setTimeout(() => {
+      const error = new ThumbnailError(504, 'thumbnail-timeout');
+      controller.abort(error);
+      job.reject(error);
+    }, THUMBNAIL.decodeMs + 1000);
+    loadThumbnail(job.id, job.target, controller.signal).then(job.resolve, job.reject).finally(() => {
+      clearTimeout(timeout);
+      thumbnailActive -= 1;
+      pumpThumbnails();
+    });
+  }
+}
+
+async function requestThumbnail(id, target) {
+  const key = JSON.stringify([id, target]);
+  let pending = thumbnailPending.get(key);
+  if (pending === undefined) {
+    if (thumbnailQueue.length >= THUMBNAIL.queueItems) throw new ThumbnailError(503, 'thumbnail-busy');
+    const promise = new Promise((resolve, reject) => {
+      const job = { id, target, resolve, reject, timer: setTimeout(() => {
+        const index = thumbnailQueue.indexOf(job);
+        if (index !== -1) thumbnailQueue.splice(index, 1);
+        reject(new ThumbnailError(503, 'thumbnail-busy'));
+      }, THUMBNAIL.queueMs) };
+      thumbnailQueue.push(job);
+      pumpThumbnails();
+    }).finally(() => thumbnailPending.delete(key));
+    pending = { promise, waiters: 0 };
+    thumbnailPending.set(key, pending);
+  }
+  if (pending.waiters >= THUMBNAIL.waitersPerItem) throw new ThumbnailError(503, 'thumbnail-busy');
+  pending.waiters += 1;
+  try {
+    return await pending.promise;
+  } finally {
+    pending.waiters -= 1;
+  }
+}
+
+async function serveMediaThumbnail(res, req, params) {
+  if ((req.method ?? 'GET').toUpperCase() !== 'GET') {
+    res.setHeader('allow', 'GET');
+    return sendJson(res, 405, { error: 'method-not-allowed' });
+  }
+  const id = params.get('id');
+  if (!id || params.getAll('id').length !== 1 || params.has('path')) return sendJson(res, 400, { error: 'bad-id' });
+  const entry = mediaIndex.get(id);
+  if (entry === undefined) return sendJson(res, 404, { error: 'unknown-media' });
+  if (entry.kind !== 'image') return sendJson(res, 415, { error: 'unsupported-image' });
+  const target = thumbnailTarget(entry);
+  try {
+    const bytes = await requestThumbnail(id, target);
+    if (res.destroyed) return;
+    const latest = mediaIndex.get(id);
+    if (latest?.kind !== 'image' || thumbnailTarget(latest) !== target) {
+      return sendJson(res, 404, { error: 'unknown-media' });
+    }
+    res.writeHead(200, {
+      'content-type': 'image/png',
+      'content-length': String(bytes.length),
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    res.end(bytes);
+  } catch (err) {
+    if (res.destroyed) return;
+    const known = err instanceof ThumbnailError;
+    sendJson(res, known ? err.status : 422, { error: known ? err.message : 'thumbnail-decode-failed' });
+  }
+}
+
 function serveMediaReveal(res, req) {
   const id = readParams(req).get('id') ?? '';
   const entry = mediaIndex.get(id);
@@ -1593,6 +1850,7 @@ function serveMediaDelete(res, req) {
     const code = err !== null && typeof err === 'object' ? err.code : undefined;
     if (code === 'ENOENT') {
       mediaIndex.delete(id);
+      forgetThumbnail(id);
       sendJson(res, 404, { error: 'not-found' });
       return;
     }
@@ -1601,6 +1859,7 @@ function serveMediaDelete(res, req) {
     return;
   }
   mediaIndex.delete(id);
+  forgetThumbnail(id);
   sendJson(res, 200, { ok: true, id });
 }
 
@@ -1753,6 +2012,10 @@ async function handleRequest(ctx, req, res) {
 
   if (path === `${ROUTE_PREFIX}/media/file`) {
     return serveMediaFile(res, req);
+  }
+
+  if (path === `${ROUTE_PREFIX}/media/thumbnail`) {
+    return serveMediaThumbnail(res, req, params);
   }
 
   if (path === `${ROUTE_PREFIX}/media/reveal`) {
