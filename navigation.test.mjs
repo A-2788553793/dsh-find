@@ -9,13 +9,20 @@ const source = readFileSync(new URL('./client.js', import.meta.url), 'utf8').rep
   "      inject: ['slots'],",
   "      test: { jumpToHit, nodeOwnsHit, hitAnchors, textLanding, cancelJump, setStore, getStore }, inject: ['slots'],",
 );
-function harness() {
+function harness({ nativeHighlight = true, brokenHighlight = false } = {}) {
   let api, now = 0, serial = 0, nav = new AbortController(), active = '', unsubscribed = 0;
   const timers = new Map(), listeners = new Map(), cleanups = [], opened = [], loaded = [], anchors = [], roots = new Map();
   const snapshots = new Map(), records = new Map(), gates = new Map();
   const setTimer = (fn, delay) => { const id = ++serial; timers.set(id, { fn, at: now + delay }); return id; };
   const clearTimer = id => timers.delete(id);
+  const highlights = new Map(), styles = [];
   const document = {
+    head: { appendChild(style) { styles.push(style); } },
+    createElement(tag) { assert.equal(tag, 'style'); return { textContent: '', remove() { styles.splice(styles.indexOf(this), 1); } }; },
+    createRange() { return {
+      setStart(node, offset) { this.startContainer = node; this.startOffset = offset; },
+      setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; },
+    }; },
     addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); },
     removeEventListener(type, fn) { listeners.get(type)?.delete(fn); },
     querySelectorAll(selector) { assert.equal(selector, '[data-conversation-content][data-conversation-session]'); return [...roots.values()].filter(r => r.session === active); },
@@ -33,17 +40,19 @@ function harness() {
     } }; } },
   };
   runInNewContext(source, {
-    window: { __ModuleLoader__: { load: ({ factory }) => { api = factory(() => ({})); } }, getComputedStyle: () => ({ display: 'block', visibility: 'visible' }), setTimeout: setTimer },
+    window: { __ModuleLoader__: { load: ({ factory }) => { api = factory(() => ({})); } }, getComputedStyle: () => ({ display: 'block', visibility: 'visible' }), setTimeout: setTimer,
+      CSS: nativeHighlight ? { highlights } : {},
+      Highlight: class { constructor(range) { if (brokenHighlight) throw new Error('unavailable'); this.range = range; } } },
     document, navigator: { language: 'en' }, AbortController, Event,
     WheelEvent: class extends Event { constructor(type, options) { super(type, options); this.deltaY = options.deltaY; } },
     NodeFilter: { SHOW_TEXT: 4 }, Date: { now: () => now }, setTimeout: setTimer, clearTimeout: clearTimer,
     fetch: async () => ({ ok: false }), console: { warn() {} },
   });
-  api.apply({ get: key => services[key], effect(fn, name) { if (name === 'dsh-find: jump lifecycle') cleanups.push(fn()); }, slots: { inject() {} } });
+  api.apply({ get: key => services[key], effect(fn, name) { if (['dsh-find: jump lifecycle', 'dsh-find: jump styles'].includes(name)) cleanups.push(fn()); }, slots: { inject() {} } });
   api.test.setStore({ open: true, searched: 'needle' });
   const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
   return {
-    ...api.test, document, anchors, roots, records, snapshots, gates, opened, loaded, timers, listeners,
+    ...api.test, document, anchors, roots, records, snapshots, gates, opened, loaded, timers, listeners, highlights, styles,
     get unsubscribed() { return unsubscribed; },
     async advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.fn(); } await flush(); },
     flush, cancelNavigation() { nav.abort(); },
@@ -81,6 +90,102 @@ function fixture(h, { session = 's', seq = 20, key = 'message-key', text = 'old 
   const hit = { sessionId: session, seq, type, channel, location: { messageId: key, contentIndex: 0, matchOffset: text.indexOf('needle') } };
   return { hit, anchor, paragraph, scroller, inner };
 }
+
+test('precise text is highlighted for exactly three seconds after the palette closes', async () => {
+  const h = harness(), f = fixture(h);
+  const work = h.jumpToHit(f.hit); await h.flush(); await h.advance(160); await h.advance(160); await work;
+  assert.equal(h.getStore().open, false);
+  const highlight = h.highlights.get('dsh-find-hit');
+  assert.ok(highlight); assert.equal(highlight.priority, 1);
+  assert.equal(highlight.range.startContainer, f.anchor.texts[0]); assert.equal(highlight.range.startOffset, 4);
+  assert.equal(highlight.range.endContainer, f.anchor.texts[0]); assert.equal(highlight.range.endOffset, 10);
+  assert.equal(f.paragraph.classes.size, 0);
+  assert.equal(h.styles.length, 1); assert.match(h.styles[0].textContent, /::highlight\(dsh-find-hit\)/);
+  await h.advance(2999); assert.equal(h.highlights.get('dsh-find-hit'), highlight);
+  await h.advance(1); assert.equal(h.highlights.size, 0); assert.equal(h.timers.size, 0);
+  h.dispose(); assert.equal(h.styles.length, 0);
+});
+
+test('a new jump clears the previous highlight before its next load finishes', async () => {
+  const h = harness(), a = fixture(h, { session: 'a' }), b = fixture(h, { session: 'b' });
+  const first = h.jumpToHit(a.hit); await h.flush(); await h.advance(160); await h.advance(160); await first;
+  assert.equal(h.highlights.size, 1);
+  let release; h.gates.set('b', new Promise(resolve => { release = resolve; }));
+  const next = h.jumpToHit(b.hit); await h.flush(); assert.equal(h.highlights.size, 0);
+  release(); await h.flush(); await h.advance(160); await h.advance(160); await next;
+  assert.equal(h.highlights.size, 1);
+  await h.advance(2680); assert.equal(h.highlights.size, 1); // past the old deadline
+  await h.advance(320); assert.equal(h.highlights.size, 0); h.dispose();
+});
+
+test('disposal clears the highlight, style and timer without deleting another owner', async () => {
+  const h = harness(), f = fixture(h);
+  const work = h.jumpToHit(f.hit); await h.flush(); await h.advance(160); await h.advance(160); await work;
+  const replacement = {}; h.highlights.set('dsh-find-hit', replacement);
+  h.dispose(); assert.equal(h.highlights.get('dsh-find-hit'), replacement);
+  assert.equal(h.styles.length, 0); assert.equal(h.timers.size, 0);
+  const other = harness(), target = fixture(other);
+  const second = other.jumpToHit(target.hit); await other.flush(); await other.advance(160); await other.advance(160); await second;
+  other.dispose(); assert.equal(other.highlights.size, 0); assert.equal(other.styles.length, 0); assert.equal(other.timers.size, 0);
+});
+
+test('unsupported or failing highlight APIs keep a readable locator and honest notice', async () => {
+  for (const mode of ['unsupported', 'throws', 'no-range']) {
+    const h = harness({ nativeHighlight: mode !== 'unsupported', brokenHighlight: mode === 'throws' }), f = fixture(h);
+    if (mode === 'no-range') h.document.createRange = undefined;
+    const work = h.jumpToHit(f.hit); await h.flush(); await h.advance(160); await h.advance(160); await work;
+    assert.equal(h.highlights.size, 0); assert.ok(f.anchor.classes.has('dsh-find-flash'));
+    assert.equal(f.paragraph.classes.size, 0);
+    assert.match(h.getStore().jumpNotice, /Located the original message/);
+    await h.advance(3000); assert.equal(f.anchor.classes.size, 0); h.dispose();
+  }
+});
+
+test('a range never paints excluded controls or hidden text between matching spans', async () => {
+  for (const excluded of ['button', 'script', 'style', 'aria-hidden']) {
+    const h = harness(), f = fixture(h, { text: 'needle' });
+    const control = element({}, f.anchor); control.closest = selector => selector.includes(excluded) ? control : null;
+    f.anchor.texts = [
+      { nodeValue: 'nee', parentElement: f.paragraph },
+      { nodeValue: 'copy', parentElement: control },
+      { nodeValue: 'dle', parentElement: f.paragraph },
+    ];
+    const landing = h.textLanding(f.anchor, 'needle', 'needle', 0);
+    assert.ok(landing); assert.equal(landing.range, null);
+    const work = h.jumpToHit(f.hit); await h.flush(); await h.advance(160); await h.advance(160); await work;
+    assert.equal(h.highlights.size, 0); assert.ok(f.anchor.classes.has('dsh-find-flash'));
+    assert.equal(f.paragraph.classes.size, 0); assert.equal(control.classes.size, 0);
+    assert.match(h.getStore().jumpNotice, /Located the original message/);
+    await h.advance(3000); assert.equal(f.anchor.classes.size, 0); h.dispose();
+  }
+});
+
+test('Unicode expansion, emoji and node boundaries produce exact UTF-16 range endpoints', () => {
+  const h = harness(), a = element();
+  const first = { nodeValue: '😀İ', parentElement: a }, second = { nodeValue: '尾', parentElement: a };
+  a.texts = [first, second];
+  const expanded = h.textLanding(a, 'i\u0307', '😀İ尾', 2);
+  assert.equal(expanded.range.startContainer, first); assert.equal(expanded.range.startOffset, 2);
+  assert.equal(expanded.range.endContainer, first); assert.equal(expanded.range.endOffset, 3);
+  const emoji = h.textLanding(a, '😀', '😀İ尾', 0);
+  assert.equal(emoji.range.startOffset, 0); assert.equal(emoji.range.endOffset, 2);
+  const tail = h.textLanding(a, '尾', '😀İ尾', 3);
+  assert.equal(tail.range.startContainer, second); assert.equal(tail.range.startOffset, 0); assert.equal(tail.range.endOffset, 1);
+  const across = h.textLanding(a, 'İ尾', '😀İ尾', 2);
+  assert.equal(across.range.startContainer, first); assert.equal(across.range.endContainer, second);
+  h.dispose();
+});
+
+test('the opaque highlight pair stays high-contrast independent of the host or palette theme', () => {
+  const h = harness(), css = h.styles[0].textContent;
+  assert.match(css, /background-color:#ffe066;color:#1b1b1b;text-shadow:none/);
+  const luminance = color => {
+    const parts = color.match(/../g).map(value => parseInt(value, 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+    return parts[0] * .2126 + parts[1] * .7152 + parts[2] * .0722;
+  };
+  assert.ok((luminance('ffe066') + .05) / (luminance('1b1b1b') + .05) > 13);
+  h.dispose();
+});
 
 test('loads the original seq and scopes repeated text to its actual Chat node', async () => {
   const h = harness(), f = fixture(h);
@@ -133,7 +238,10 @@ test('archive and record identity failures do not scroll unrelated text', async 
 test('source context disambiguates repeated text and inline text is searchable', () => {
   const h = harness(), a = element(), p = element({}, a), q = element({}, a);
   a.texts = [{ nodeValue: 'first needle A ', parentElement: p }, { nodeValue: 'second nee', parentElement: q }, { nodeValue: 'dle B', parentElement: q }];
-  assert.equal(h.textLanding(a, 'needle', 'second needle B', 7), q);
+  const landing = h.textLanding(a, 'needle', 'second needle B', 7);
+  assert.equal(landing.element, q);
+  assert.equal(landing.range.startContainer, a.texts[1]); assert.equal(landing.range.startOffset, 7);
+  assert.equal(landing.range.endContainer, a.texts[2]); assert.equal(landing.range.endOffset, 3);
   a.texts = [{ nodeValue: 'needle needle', parentElement: p }];
   assert.equal(h.textLanding(a, 'needle', undefined, undefined), null);
 });
@@ -142,7 +250,7 @@ test('Unicode lowercase expansion selects the original text node', () => {
   const h = harness(), a = element(), prefix = element({}, a), match = element({}, a), tail = element({}, a);
   const text = 'İ'.repeat(7) + 'needle' + 'tail';
   a.texts = [{ nodeValue: 'İ'.repeat(7), parentElement: prefix }, { nodeValue: 'needle', parentElement: match }, { nodeValue: 'tail', parentElement: tail }];
-  assert.equal(h.textLanding(a, 'needle', text, 7), match);
+  assert.equal(h.textLanding(a, 'needle', text, 7).element, match);
 });
 
 test('a unique word in the wrong content block is not an exact landing', () => {

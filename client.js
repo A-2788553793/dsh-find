@@ -12,6 +12,13 @@ window.__ModuleLoader__.load({
     const TOTAL_HITS = 120;
     const PER_SESSION = 3;
     const FLASH_CLASS = 'dsh-find-flash';
+    const HIT_HIGHLIGHT = 'dsh-find-hit';
+    const HIT_DURATION_MS = 3000;
+    // Paired colors keep syntax-colored and linked text readable in both themes.
+    const JUMP_CSS = [
+      '::highlight(' + HIT_HIGHLIGHT + '){background-color:#ffe066;color:#1b1b1b;text-shadow:none;}',
+      '.' + FLASH_CLASS + '{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px;border-radius:8px;}',
+    ].join('');
     const MEDIA_TOTAL = 800;
     const FILES_CONCURRENCY = 4;
     const SPEAKER_LABELS = {
@@ -290,8 +297,6 @@ window.__ModuleLoader__.load({
       '.dsh-find-error{padding:18px 16px;font-size:12.5px;color:var(--dsw-alias-label-secondary);}',
       '.dsh-find-spinner{display:inline-block;width:11px;height:11px;border-radius:50%;border:1.6px solid var(--dsw-alias-border-l1);border-top-color:var(--dsw-alias-label-secondary);animation:dsh-find-spin .8s linear infinite;vertical-align:-1px;margin-right:6px;}',
       '@keyframes dsh-find-spin{to{transform:rotate(360deg)}}',
-      `.${FLASH_CLASS}{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:3px;border-radius:8px;transition:outline-color .4s ease;animation:dsh-find-pulse 1.4s ease-out 2;}`,
-      '@keyframes dsh-find-pulse{0%{outline-offset:3px;}50%{outline-offset:7px;}100%{outline-offset:3px;}}',
       '.dsh-find-tabs{flex:none;display:flex;align-items:flex-end;gap:4px;padding:8px 12px 0;border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
       '.dsh-find-tab{appearance:none;border:0;background:transparent;font-family:inherit;font-size:12.5px;font-weight:500;color:var(--dsw-alias-label-secondary);padding:7px 16px 8px;border-radius:8px 8px 0 0;cursor:pointer;transition:background .12s ease,color .12s ease;}',
       '.dsh-find-tab:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
@@ -2615,6 +2620,7 @@ window.__ModuleLoader__.load({
     function cancelJump() {
       if (activeJump) activeJump.abort();
       activeJump = null;
+      if (flashCleanup) flashCleanup();
       if (store.jumpNotice) setStore({ jumpNotice: '' });
     }
 
@@ -2691,11 +2697,11 @@ window.__ModuleLoader__.load({
       if (!query) return null;
       const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
       const spans = [];
-      let text = '', node;
+      let text = '', node, segment = 0;
       while ((node = walker.nextNode())) {
-        if (node.parentElement?.closest('button,script,style,[aria-hidden="true"]')) continue;
+        if (node.parentElement?.closest('button,script,style,[aria-hidden="true"]')) { segment++; continue; }
         const value = node.nodeValue || '';
-        spans.push({ node, start: text.length, end: text.length + value.length });
+        spans.push({ node, segment, start: text.length, end: text.length + value.length });
         text += value;
       }
       // Markdown can split one query across inline text nodes. Source context
@@ -2703,10 +2709,12 @@ window.__ModuleLoader__.load({
       const needle = query.toLowerCase(), lower = text.toLowerCase();
       // Lowercasing can expand a code point (İ -> i + combining dot).
       // Preserve a folded-to-original UTF-16 map before selecting a DOM span.
-      const originalAt = [];
+      const originalAt = [], originalEndAt = [];
       let original = 0;
       for (const point of text) {
-        for (let n = 0; n < point.toLowerCase().length; n++) originalAt.push(original);
+        for (let n = 0; n < point.toLowerCase().length; n++) {
+          originalAt.push(original); originalEndAt.push(original + point.length);
+        }
         original += point.length;
       }
       const candidates = [];
@@ -2716,6 +2724,22 @@ window.__ModuleLoader__.load({
         if (span) candidates.push({ element: span.node.parentElement, index });
         from = index + Math.max(1, needle.length);
       }
+      const landingFor = candidate => {
+        const start = originalAt[candidate.index];
+        const end = originalEndAt[candidate.index + needle.length - 1];
+        const first = spans.find(item => item.end > start);
+        const last = spans.find(item => item.start < end && item.end >= end);
+        if (!first || !last) return null;
+        let range = null;
+        try {
+          // A single Range must not paint excluded text between searchable spans.
+          if (first.segment !== last.segment) return { element: candidate.element, range: null };
+          range = document.createRange();
+          range.setStart(first.node, start - first.start);
+          range.setEnd(last.node, end - last.start);
+        } catch (_) { range = null; }
+        return { element: candidate.element, range };
+      };
       // A unique word in the group may belong to a different content block.
       // Require the complete source block when available; otherwise only rank
       // genuinely repeated candidates with source context below.
@@ -2725,7 +2749,7 @@ window.__ModuleLoader__.load({
         if (start >= 0 && lower.indexOf(block, start + 1) < 0) {
           const expected = start + sourceText.slice(0, offset).toLowerCase().length;
           const exact = candidates.find(candidate => candidate.index === expected);
-          if (exact) return exact.element;
+          if (exact) return landingFor(exact);
         }
       }
       if (candidates.length === 1) return null;
@@ -2746,10 +2770,10 @@ window.__ModuleLoader__.load({
         for (let n = 1; n <= after.length && right.startsWith(after.slice(0, n)); n++) score++;
         return { ...candidate, score };
       }).sort((a, b) => b.score - a.score);
-      return scored[0].score >= 8 && scored[0].score > scored[1].score ? scored[0].element : null;
+      return scored[0].score >= 8 && scored[0].score > scored[1].score ? landingFor(scored[0]) : null;
     }
 
-    function scrollToHit(element) {
+    function scrollToHit(element, range, locator = element) {
       const scroller = element.closest('[data-conversation-scroll]');
       if (!scroller) throw new Error('Chat scroll container unavailable');
       revealForJump(element);
@@ -2764,13 +2788,26 @@ window.__ModuleLoader__.load({
       scroller.dispatchEvent(new Event('scroll'));
       scroller.dispatchEvent(new Event('scrollend'));
       if (flashCleanup) flashCleanup();
-      element.classList.add(FLASH_CLASS);
-      const timer = setTimeout(() => cleanup(), 4000);
+      // Paint without wrapping React-owned text, changing the user's selection,
+      // or affecting line wrapping. Unsupported browsers retain the locator.
+      const registry = window.CSS?.highlights;
+      let highlight = null;
+      if (range && registry && typeof window.Highlight === 'function') {
+        try {
+          highlight = new window.Highlight(range);
+          highlight.priority = 1;
+          registry.set(HIT_HIGHLIGHT, highlight);
+        } catch (_) { highlight = null; }
+      }
+      if (!highlight) locator.classList.add(FLASH_CLASS);
+      const timer = setTimeout(() => cleanup(), HIT_DURATION_MS);
       const cleanup = () => {
-        clearTimeout(timer); element.classList.remove(FLASH_CLASS);
+        clearTimeout(timer); locator.classList.remove(FLASH_CLASS);
+        if (highlight && registry.get(HIT_HIGHLIGHT) === highlight) registry.delete(HIT_HIGHLIGHT);
         if (flashCleanup === cleanup) flashCleanup = null;
       };
       flashCleanup = cleanup;
+      return !!highlight;
     }
 
     async function locateHit(reference, hit, query, signal) {
@@ -2823,10 +2860,9 @@ window.__ModuleLoader__.load({
             // the same text. Without a result-specific DOM id, stop at message.
             const landing = textReady ? textLanding(anchor, query, sourceText, hit.location?.matchOffset) : null;
             if (landing) {
-              if (!visibleForJump(landing)) { revealForJump(landing); continue; }
+              if (!visibleForJump(landing.element)) { revealForJump(landing.element); continue; }
               if (signal.aborted) return;
-              scrollToHit(landing);
-              return 'exact';
+              return scrollToHit(landing.element, landing.range, anchor) ? 'exact' : 'message';
             }
             if (!fallback && visibleForJump(anchor)) fallback = anchor;
           }
@@ -3016,6 +3052,13 @@ window.__ModuleLoader__.load({
 
     function install(ctx) {
       ctxRef = ctx;
+      // An exact jump closes the palette; its stylesheet must stay alive.
+      ctx.effect(() => {
+        const style = document.createElement('style');
+        style.textContent = JUMP_CSS;
+        document.head.appendChild(style);
+        return () => style.remove();
+      }, 'dsh-find: jump styles');
       ctx.effect(() => () => {
         cancelJump();
         if (flashCleanup) flashCleanup();
