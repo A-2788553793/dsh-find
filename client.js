@@ -94,6 +94,10 @@ window.__ModuleLoader__.load({
         speakerTool: '工具',
         speakerSystem: '系统',
         speakerFiltered: '没有可显示的命中：{count} 条已按来源筛选隐藏',
+        jumpLoading: '正在定位原消息…',
+        jumpMessage: '已定位到原消息；具体文字可能被折叠或格式化。',
+        jumpFailed: '未能定位原消息，请重新查找后重试。',
+        jumpDismiss: '关闭提示',
         archivedNotice: '这个对话已经归档，不能跳转。可以在侧栏的归档列表里取消归档后再试。',
         menuSaveAs: '另存为…',
         savedAs: '已另存为 {name}',
@@ -121,6 +125,10 @@ window.__ModuleLoader__.load({
         themeFailed: '设置没能保存：{message}',
       },
       en: {
+        jumpLoading: 'Locating the original message…',
+        jumpMessage: 'Located the original message; the exact text may be folded or formatted.',
+        jumpFailed: 'Could not locate the original message. Search again and retry.',
+        jumpDismiss: 'Dismiss',
         title: 'Find in conversations',
         placeholder: 'Type text to find, Enter to jump…',
         empty: 'Type text, then press Enter or click Find.',
@@ -220,6 +228,8 @@ window.__ModuleLoader__.load({
     };
 
     const CSS = [
+      '.dsh-find-jump-notice{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:1000;max-width:min(640px,85vw);padding:12px 16px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 4px 20px var(--dsw-alias-border-l1);font-size:13px;display:flex;align-items:center;gap:16px;}',
+      '.dsh-find-jump-notice button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:18px;}',
       '.dsh-find-overlay{position:fixed;inset:0;display:flex;align-items:flex-start;justify-content:center;padding:8vh 16px 16px;box-sizing:border-box;pointer-events:auto;z-index:2147480000;}',
       '.dsh-find-backdrop{position:absolute;inset:0;background:var(--df-backdrop,var(--dsw-alias-bg-base));opacity:.42;}',
       '.dsh-find-panel{position:relative;width:100%;max-width:1080px;height:76vh;display:flex;flex-direction:column;border-radius:14px;background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l1);box-shadow:0 20px 60px rgba(0,0,0,.28);overflow:hidden;box-sizing:border-box;}',
@@ -398,6 +408,7 @@ window.__ModuleLoader__.load({
       preview: null,
       menu: null,
       notice: '',
+      jumpNotice: '',
       theme: 'auto',
     };
     const listeners = new Set();
@@ -1234,6 +1245,8 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------ palette */
 
     function openPalette() {
+      cancelJump();
+      setStore({ jumpNotice: '' });
       const selection = readSelectionText();
       if (selection !== null && selection !== store.query) {
         openPaletteWith(selection);
@@ -1243,6 +1256,8 @@ window.__ModuleLoader__.load({
     }
 
     function openPaletteWith(query) {
+      cancelJump();
+      setStore({ jumpNotice: '' });
       scheduleSearch(query, { open: true, tab: 'text', notice: '', preview: null, menu: null });
     }
 
@@ -1881,7 +1896,15 @@ window.__ModuleLoader__.load({
         return { shownBySession, loadedMediaCount };
       }, [isMedia, sessionMedia, mediaSpeakers, hideArchived]);
 
-      if (!state.open) return null;
+      if (!state.open) return state.jumpNotice ? h(React.Fragment, null,
+        h('style', null, CSS),
+        h('div', { className: 'dsh-find-jump-notice', role: 'status', 'aria-live': 'polite' },
+          state.jumpNotice,
+          h('button', { type: 'button', 'aria-label': t('jumpDismiss'), onClick: () => {
+            cancelJump(); setStore({ jumpNotice: '' });
+          } }, '×'),
+        ),
+      ) : null;
 
       const { grouped, speakerHidden } = textView || {};
       const mediaWorkspaces = isMedia && Array.isArray(mediaTree?.workspaces) ? mediaTree.workspaces : [];
@@ -2584,123 +2607,291 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- jump */
 
-    function isVisible(element) {
-      if (!element || !element.isConnected) return false;
-      try {
-        if (element.getClientRects().length === 0) return false;
-        const style = window.getComputedStyle(element);
-        if (style.visibility === 'hidden' || style.display === 'none') return false;
-        return true;
-      } catch (err) {
-        return false;
-      }
+    // Chat has no public message-navigation API yet. Keep this DOM adapter
+    // identity-scoped and fail closed if the installed Chat contract changes.
+    let activeJump = null;
+    let flashCleanup = null;
+
+    function cancelJump() {
+      if (activeJump) activeJump.abort();
+      activeJump = null;
+      if (store.jumpNotice) setStore({ jumpNotice: '' });
     }
 
-    function findVisibleText(query) {
-      const needle = query.toLowerCase();
-      if (needle.length === 0) return null;
-      const dialog = document.querySelector('[' + DIALOG_ATTR + ']');
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-      let node = walker.nextNode();
-      while (node) {
-        const value = node.nodeValue;
-        if (typeof value === 'string' && value.toLowerCase().includes(needle)) {
-          const parent = node.parentElement;
-          if (parent && !(dialog && dialog.contains(parent)) && isVisible(parent)) return parent;
-        }
-        node = walker.nextNode();
-      }
-      return null;
-    }
-
-    function closestBlock(element) {
-      let node = element;
-      for (let depth = 0; depth < 8 && node && node !== document.body; depth += 1) {
-        const rect = node.getBoundingClientRect();
-        if (rect.width >= 220 && rect.height >= 24) return node;
-        node = node.parentElement;
-      }
-      return element;
-    }
-
-    function flashElement(element) {
-      const target = closestBlock(element);
-      try {
-        target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      } catch (err) {
-        /* older engines */
-      }
-      target.classList.add(FLASH_CLASS);
-      setTimeout(() => {
-        try {
-          target.classList.remove(FLASH_CLASS);
-        } catch (err) {
-          /* ignore */
-        }
-      }, 4000);
-    }
-
-    function waitForText(query, timeoutMs) {
-      const deadline = Date.now() + timeoutMs;
+    function jumpDelay(signal, ms) {
       return new Promise((resolve) => {
-        const tick = () => {
-          const found = findVisibleText(query);
-          if (found) {
-            flashElement(found);
-            resolve(true);
-            return;
-          }
-          if (Date.now() > deadline) {
-            resolve(false);
-            return;
-          }
-          setTimeout(tick, 160);
-        };
-        setTimeout(tick, 260);
+        if (signal.aborted) return resolve();
+        const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+        const timer = setTimeout(done, ms);
+        signal.addEventListener('abort', done, { once: true });
       });
     }
 
-    async function jumpToHit(hit) {
-      /* An archived conversation is not mounted by the UI, so opening it lands
-         nowhere; say so instead of closing the palette onto a blank screen. */
-      if (hit && hit.archived === true) {
-        const t = makeT();
-        setStore({ notice: t('archivedNotice') });
-        setTimeout(() => {
-          if (store.notice.length > 0) setStore({ notice: '' });
-        }, 6000);
-        return;
+    function untilJumpAbort(promise, signal) {
+      return new Promise((resolve, reject) => {
+        const abort = () => { cleanup(); reject(new Error('Jump cancelled')); };
+        const cleanup = () => signal.removeEventListener('abort', abort);
+        if (signal.aborted) return abort();
+        signal.addEventListener('abort', abort, { once: true });
+        Promise.resolve(promise).then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
+      });
+    }
+
+    function nodeOwnsHit(node, hit) {
+      const data = node.data || {};
+      if (data.seq === hit.seq || data.finalNode?.seq === hit.seq) return true;
+      // Tool lifecycle nodes may contain nested results.
+      const pending = data.root ? [data.root] : [];
+      while (pending.length) {
+        const call = pending.pop();
+        if (call.seq === hit.seq) return true;
+        if (Array.isArray(call.subCalls)) pending.push(...call.subCalls);
       }
+      return false;
+    }
 
-      const query = String(store.searched || store.query || '').trim();
-      closePalette();
+    function hitAnchors(snapshot, hit) {
+      if (!snapshot?.nodes || typeof snapshot.nodes.values !== 'function') return [];
+      const keys = new Set();
+      for (const node of snapshot.nodes.values()) {
+        if (nodeOwnsHit(node, hit)) keys.add(String(node.key));
+      }
+      if (!keys.size) return [];
+      // Never confuse a fork/embedded conversation with the selected session.
+      // Duplicate visible mounts are ambiguous: fail closed instead of guessing.
+      const roots = Array.from(document.querySelectorAll('[data-conversation-content][data-conversation-session]')).filter(element =>
+        element.getAttribute('data-conversation-session') === hit.sessionId &&
+        element.getAttribute('data-content-phase') === 'active' && visibleForJump(element),
+      );
+      if (roots.length !== 1) return [];
+      const preferred = hit.channel === 'thinking' ? 'reasoning' : 'response';
+      return Array.from(roots[0].querySelectorAll('[data-chat-node-key]')).filter(element => {
+        const part = element.getAttribute('data-chat-group-part');
+        return keys.has(element.getAttribute('data-chat-node-key')) && element.isConnected &&
+          element.closest('[data-conversation-content]') === roots[0] && (!part || part === preferred);
+      });
+    }
 
-      const uiWorkspace = safeService('uiWorkspace');
+    function revealForJump(element) {
+      // beforematch runs Chat's own disclosure + reading-interruption handlers.
+      // Do not remove hidden attributes behind React's back.
+      element.dispatchEvent(new Event('beforematch', { bubbles: true }));
+    }
+
+    function visibleForJump(element) {
+      if (!element?.isConnected || !element.getClientRects().length) return false;
+      for (let current = element; current; current = current.parentElement) {
+        if (current.hasAttribute('hidden')) return false;
+      }
+      const style = window.getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    }
+
+    function textLanding(anchor, query, sourceText, offset) {
+      if (!query) return null;
+      const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
+      const spans = [];
+      let text = '', node;
+      while ((node = walker.nextNode())) {
+        if (node.parentElement?.closest('button,script,style,[aria-hidden="true"]')) continue;
+        const value = node.nodeValue || '';
+        spans.push({ node, start: text.length, end: text.length + value.length });
+        text += value;
+      }
+      // Markdown can split one query across inline text nodes. Source context
+      // disambiguates repeated words/blocks; no global-document fallback.
+      const needle = query.toLowerCase(), lower = text.toLowerCase();
+      // Lowercasing can expand a code point (İ -> i + combining dot).
+      // Preserve a folded-to-original UTF-16 map before selecting a DOM span.
+      const originalAt = [];
+      let original = 0;
+      for (const point of text) {
+        for (let n = 0; n < point.toLowerCase().length; n++) originalAt.push(original);
+        original += point.length;
+      }
+      const candidates = [];
+      let from = 0, index;
+      while ((index = lower.indexOf(needle, from)) >= 0) {
+        const span = spans.find(item => item.end > originalAt[index]);
+        if (span) candidates.push({ element: span.node.parentElement, index });
+        from = index + Math.max(1, needle.length);
+      }
+      // A unique word in the group may belong to a different content block.
+      // Require the complete source block when available; otherwise only rank
+      // genuinely repeated candidates with source context below.
+      if (typeof sourceText === 'string' && Number.isInteger(offset)) {
+        const block = sourceText.toLowerCase();
+        const start = lower.indexOf(block);
+        if (start >= 0 && lower.indexOf(block, start + 1) < 0) {
+          const expected = start + sourceText.slice(0, offset).toLowerCase().length;
+          const exact = candidates.find(candidate => candidate.index === expected);
+          if (exact) return exact.element;
+        }
+      }
+      if (candidates.length === 1) return null;
+      if (!candidates.length || typeof sourceText !== 'string' || !Number.isInteger(offset)) return null;
+      const before = sourceText.slice(Math.max(0, offset - 60), offset).toLowerCase();
+      // Find the source match's actual length, not query.length: its original
+      // case may occupy a different number of UTF-16 units after folding.
+      let matchEnd = offset, foldedLength = 0;
+      for (const point of sourceText.slice(offset)) {
+        if (foldedLength >= needle.length) break;
+        matchEnd += point.length; foldedLength += point.toLowerCase().length;
+      }
+      const after = sourceText.slice(matchEnd, matchEnd + 60).toLowerCase();
+      const scored = candidates.map(candidate => {
+        let score = 0;
+        const left = lower.slice(0, candidate.index), right = lower.slice(candidate.index + needle.length);
+        for (let n = 1; n <= before.length && left.endsWith(before.slice(-n)); n++) score++;
+        for (let n = 1; n <= after.length && right.startsWith(after.slice(0, n)); n++) score++;
+        return { ...candidate, score };
+      }).sort((a, b) => b.score - a.score);
+      return scored[0].score >= 8 && scored[0].score > scored[1].score ? scored[0].element : null;
+    }
+
+    function scrollToHit(element) {
+      const scroller = element.closest('[data-conversation-scroll]');
+      if (!scroller) throw new Error('Chat scroll container unavailable');
+      revealForJump(element);
+      const process = element.closest('[data-step-process-body]');
+      if (process) process.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 0 }));
+      element.scrollIntoView({ block: 'center', behavior: 'instant' });
+      // Commit inner first, then outer, before tail-follow can restore bottom.
+      if (process) {
+        process.dispatchEvent(new Event('scroll'));
+        process.dispatchEvent(new Event('scrollend', { bubbles: true }));
+      }
+      scroller.dispatchEvent(new Event('scroll'));
+      scroller.dispatchEvent(new Event('scrollend'));
+      if (flashCleanup) flashCleanup();
+      element.classList.add(FLASH_CLASS);
+      const timer = setTimeout(() => cleanup(), 4000);
+      const cleanup = () => {
+        clearTimeout(timer); element.classList.remove(FLASH_CLASS);
+        if (flashCleanup === cleanup) flashCleanup = null;
+      };
+      flashCleanup = cleanup;
+    }
+
+    async function locateHit(reference, hit, query, signal) {
+      const conversation = safeService('uiConversation');
+      if (!conversation || typeof conversation.binding !== 'function') throw new Error('Chat projection unavailable');
+      const target = conversation.binding(reference.binding).target('chat');
+      const unsubscribe = target.subscribe(() => {});
       try {
-        if (uiWorkspace && typeof uiWorkspace.openSession === 'function') {
-          uiWorkspace.openSession(hit.sessionId);
+        const entries = reference.binding.eventSource.getSnapshot().entries;
+        const event = entries.find(entry => entry.type === 'event' && entry.event?.seq === hit.seq)?.event;
+        if (!event || event.type !== hit.type) throw new Error('Original record unavailable');
+        const message = event.type === 'user/message' ? event.data : event.data?.message;
+        if (hit.location?.messageId !== undefined && String(message?.id) !== String(hit.location.messageId)) {
+          throw new Error('Original message changed');
         }
-      } catch (err) {
-        console.warn('[dsh-find] openSession failed', err);
-      }
-
-      const sessions = safeService('sessions');
-      if (sessions && typeof sessions.using === 'function' && hit.seq !== undefined && hit.seq !== null) {
-        try {
-          await sessions.using(hit.sessionId, { source: 'controllerOperation' }, async (reference) => {
-            await reference.ready;
-            const face = reference.binding && reference.binding.session;
-            if (face && typeof face.loadThrough === 'function') {
-              await face.loadThrough(hit.seq);
+        const sourceText = message?.content?.[hit.location?.contentIndex]?.text;
+        // Allow the selected Chat mount and its initial history commit to finish.
+        await jumpDelay(signal, 160);
+        const stableSince = new WeakMap();
+        const revealed = new WeakSet();
+        const deadline = Date.now() + 7000;
+        while (!signal.aborted && Date.now() < deadline) {
+          const anchors = hitAnchors(target.getSnapshot(), hit);
+          let fallback = null;
+          for (const anchor of anchors) {
+            revealForJump(anchor);
+            if (!stableSince.has(anchor)) stableSince.set(anchor, Date.now());
+            // Chat's first layout/restore and disclosure effects must settle
+            // after this target mount, not merely after session.ready.
+            if (Date.now() - stableSince.get(anchor) < 160) continue;
+            // No content-index DOM contract exists. Multiple same-channel
+            // blocks (or nested Tool results) cannot be distinguished safely.
+            const blockType = hit.channel === 'thinking' ? 'reasoning' : 'text';
+            const sourceBlocks = message?.content?.filter(block => block.type === blockType && typeof block.text === 'string' && block.text.trim()) || [];
+            let textReady = ['user/message', 'assistant/message'].includes(hit.type) && sourceBlocks.length === 1 &&
+              message?.content?.[hit.location?.contentIndex] === sourceBlocks[0];
+            if (hit.channel === 'thinking') {
+              const rows = Array.from(anchor.querySelectorAll('[data-variant="think"]'));
+              const reasoning = message?.content?.filter(block => block.type === 'reasoning') || [];
+              // The installed renderer has no content-index DOM attribute.
+              // Only auto-open an unambiguous single reasoning block/row.
+              if (reasoning.length === 1 && rows.length === 1 && !rows[0].hasAttribute('data-expanded') && !revealed.has(rows[0])) {
+                const button = rows[0].querySelector('[data-disclosure-row][role="button"][aria-expanded="false"]');
+                if (button) { revealed.add(rows[0]); button.click(); continue; }
+              }
+              // Collapsed summaries are not the original reasoning body.
+              if (rows.some(row => !row.hasAttribute('data-expanded'))) textReady = false;
             }
-          });
-        } catch (err) {
-          console.warn('[dsh-find] loadThrough failed', err);
+            // Tool lifecycle groups may include inputs and nested results with
+            // the same text. Without a result-specific DOM id, stop at message.
+            const landing = textReady ? textLanding(anchor, query, sourceText, hit.location?.matchOffset) : null;
+            if (landing) {
+              if (!visibleForJump(landing)) { revealForJump(landing); continue; }
+              if (signal.aborted) return;
+              scrollToHit(landing);
+              return 'exact';
+            }
+            if (!fallback && visibleForJump(anchor)) fallback = anchor;
+          }
+          // Give disclosures and initial mount time to publish. A message-only
+          // fallback is honest, and never selects an unrelated repeated word.
+          if (fallback && Date.now() > deadline - 6200 && visibleForJump(fallback) &&
+            hitAnchors(target.getSnapshot(), hit).includes(fallback)) {
+            if (!signal.aborted) scrollToHit(fallback);
+            return 'message';
+          }
+          await jumpDelay(signal, 80);
         }
-      }
+        if (!signal.aborted) throw new Error('Message anchor unavailable');
+      } finally { unsubscribe(); }
+    }
 
-      if (query.length > 0) {
-        await waitForText(query, 7000);
+    async function jumpToHit(hit) {
+      cancelJump();
+      if (!hit) return;
+      const t = makeT();
+      if (hit.archived === true) { flashNotice(t('archivedNotice')); return; }
+      const controller = new AbortController();
+      activeJump = controller;
+      const signal = controller.signal;
+      const query = String(store.searched || store.query || '').trim();
+      const uiWorkspace = safeService('uiWorkspace'), sessions = safeService('sessions');
+      const layout = safeService('layout');
+      if (!uiWorkspace?.openSession || !sessions?.using || !layout?.beginNavigation || !Number.isInteger(hit.seq)) {
+        flashNotice(t('jumpFailed')); cancelJump(); return;
+      }
+      closePalette();
+      setStore({ jumpNotice: t('jumpLoading') });
+      let navigation, timeout;
+      const abort = () => controller.abort();
+      let timedOut = false;
+      const userIntent = event => {
+        if (event.isTrusted && (event.type !== 'keydown' || ['Escape', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(event.key))) abort();
+      };
+      try {
+        uiWorkspace.openSession(hit.sessionId);
+        navigation = layout.beginNavigation();
+        if (navigation.aborted) controller.abort();
+        navigation.addEventListener('abort', abort, { once: true });
+        for (const type of ['wheel', 'pointerdown', 'touchstart', 'keydown']) document.addEventListener(type, userIntent, true);
+        timeout = setTimeout(() => { timedOut = true; abort(); }, 12000);
+        const result = await untilJumpAbort(sessions.using(hit.sessionId, { source: 'controllerOperation', signal }, async reference => {
+          await untilJumpAbort(reference.ready, signal);
+          await untilJumpAbort(reference.binding.session.loadThrough(hit.seq), signal);
+          if (signal.aborted) return;
+          return locateHit(reference, hit, query, signal);
+        }), signal);
+        if (!signal.aborted && activeJump === controller) setStore({ jumpNotice: result === 'exact' ? '' : t('jumpMessage') });
+      } catch (error) {
+        if (!signal.aborted && activeJump === controller) {
+          console.warn('[dsh-find] jump failed', error);
+          setStore({ jumpNotice: t('jumpFailed') });
+        }
+      } finally {
+        clearTimeout(timeout);
+        navigation?.removeEventListener('abort', abort);
+        for (const type of ['wheel', 'pointerdown', 'touchstart', 'keydown']) document.removeEventListener(type, userIntent, true);
+        if (activeJump === controller) {
+          activeJump = null;
+          if (signal.aborted) setStore({ jumpNotice: timedOut ? t('jumpFailed') : '' });
+        }
       }
     }
 
@@ -2825,6 +3016,10 @@ window.__ModuleLoader__.load({
 
     function install(ctx) {
       ctxRef = ctx;
+      ctx.effect(() => () => {
+        cancelJump();
+        if (flashCleanup) flashCleanup();
+      }, 'dsh-find: jump lifecycle');
 
       const locale = safeService('locale');
       if (locale && typeof locale.register === 'function') {

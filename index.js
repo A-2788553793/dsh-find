@@ -209,27 +209,27 @@ function extractBlocks(event) {
   if (data === null || typeof data !== 'object') return [];
 
   const blocks = [];
-  const push = (content, role) => {
+  const push = (content, role, message) => {
     if (!Array.isArray(content)) return;
-    for (const block of content) {
+    for (const [contentIndex, block] of content.entries()) {
       if (block === null || typeof block !== 'object') continue;
       const text = typeof block.text === 'string' ? block.text : null;
       if (text === null || text.length === 0) continue;
       if (block.type === 'reasoning') {
-        blocks.push({ channel: 'thinking', role, text });
+        blocks.push({ channel: 'thinking', role, text, contentIndex, message });
       } else if (block.type === 'text') {
-        blocks.push({ channel: 'conversation', role, text });
+        blocks.push({ channel: 'conversation', role, text, contentIndex, message });
       }
     }
   };
 
   if (Array.isArray(data.content)) {
     /* user/message stores the message itself in `data` */
-    push(data.content, data.role ?? null);
+    push(data.content, data.role ?? null, data);
   }
   if (data.message !== null && typeof data.message === 'object') {
     /* assistant/message and tool/result store the message under `data.message` */
-    push(data.message.content, data.message.role ?? null);
+    push(data.message.content, data.message.role ?? null, data.message);
   }
 
   return blocks;
@@ -250,6 +250,40 @@ function speakerOf(eventType, data) {
   if (eventType === 'assistant/message') return 'assistant';
   if (eventType === 'tool/result') return 'tool';
   return null;
+}
+
+/** First case-insensitive match, measured in UTF-16 units of the original text. */
+function matchOffset(text, query) {
+  const folded = text.toLowerCase();
+  const index = folded.indexOf(query.toLowerCase());
+  if (folded.length === text.length) return index;
+  // Unicode lowercasing can expand a character (for example U+0130).
+  let original = 0;
+  let lowered = 0;
+  for (const character of text) {
+    lowered += character.toLowerCase().length;
+    if (lowered > index) return original;
+    original += character.length;
+  }
+  return original;
+}
+
+/** Only copy identities actually carried by this event/message; seq is not a UI key. */
+function hitLocation(event, block, query) {
+  const location = { contentIndex: block.contentIndex, matchOffset: matchOffset(block.text, query) };
+  const message = block.message;
+  if (typeof message.id === 'string' && message.id.length > 0) location.messageId = message.id;
+  if (event.type === 'assistant/message' || event.type === 'tool/result') {
+    for (const field of ['turn', 'step']) {
+      if (Number.isSafeInteger(event.data[field]) && event.data[field] >= 0) location[field] = event.data[field];
+    }
+  }
+  if (event.type === 'tool/result') {
+    const callId = typeof message.toolCallId === 'string' && message.toolCallId.length > 0
+      ? message.toolCallId : message.source?.kind === 'tool' ? message.source.callId : undefined;
+    if (typeof callId === 'string' && callId.length > 0) location.callId = callId;
+  }
+  return location;
 }
 
 /* ----------------------------------------------------------------- search */
@@ -341,6 +375,7 @@ async function runSearch(ctx, query, options, signal) {
           role: null,
           speaker: speakerOf(document.type, null),
           channel: 'conversation',
+          location: { matchOffset: matchOffset(document.text, query) },
           ...built,
         });
       }
@@ -380,6 +415,7 @@ async function runSearch(ctx, query, options, signal) {
           role: block.role,
           speaker: speakerOf(event.type, event.data),
           channel: block.channel,
+          location: hitLocation(event, block, query),
           ...built,
         });
       }

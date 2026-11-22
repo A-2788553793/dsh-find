@@ -221,6 +221,117 @@ test('a title batch failure falls back to null, and an empty result skips the ba
   assert.equal(titleReads, 1);
 });
 
+test('locations retain real message identities and original content indices across event types', async () => {
+  const userEvent = {
+    seq: 10, type: 'user/message', data: {
+      id: 'user-id', role: 'user', source: { kind: 'user' },
+      content: [
+        { type: 'image', attachment: {} }, null, { type: 'text', text: '' },
+        { type: 'file', text: query }, { type: 'text', text: 'prefix\n\nsecond NeEdLe needle' },
+      ],
+    },
+  };
+  const assistantEvent = {
+    seq: 20, type: 'assistant/message', data: {
+      turn: 7, step: 2, stream: [], message: {
+        id: 'assistant-id', role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' },
+        content: [
+          { type: 'text', text: 'no match' }, { type: 'tool-call', id: 'call-id', name: 'test', arguments: query },
+          { type: 'reasoning', text: 'why NEEDLE' }, { type: 'image', attachment: {} },
+          { type: 'text', text: 'answer needle' }, { type: 'text', text: 'needle again needle' },
+        ],
+      },
+    },
+  };
+  const toolEvent = {
+    seq: 30, type: 'tool/result', data: {
+      turn: 7, step: 2, message: {
+        id: 'tool-message-id', role: 'tool', toolCallId: 'call-id', source: { kind: 'tool', callId: 'call-id' },
+        content: [{ type: 'image', attachment: {} }, { type: 'text', text: 'result NEEDLE' }],
+      },
+    },
+  };
+  const { status, body } = await mount({
+    filterEvents: async () => [candidate(10), candidate(20), candidate(30)],
+    readSession: async () => ({ events: [userEvent, assistantEvent, assistantEvent, toolEvent] }),
+  })({ perSession: 20 }).response;
+  assert.equal(status, 200);
+  assert.deepEqual(body.hits.map(({ seq, type, channel, role, speaker, snippet, offset, occurrences, location }) => ({
+    seq, type, channel, role, speaker, snippet, offset, occurrences, location,
+  })), [
+    { seq: 10, type: 'user/message', channel: 'conversation', role: 'user', speaker: 'user',
+      snippet: 'second NeEdLe needle', offset: 7, occurrences: 2,
+      location: { messageId: 'user-id', contentIndex: 4, matchOffset: 15 } },
+    { seq: 20, type: 'assistant/message', channel: 'thinking', role: 'assistant', speaker: 'assistant',
+      snippet: 'why NEEDLE', offset: 4, occurrences: 1,
+      location: { messageId: 'assistant-id', turn: 7, step: 2, contentIndex: 2, matchOffset: 4 } },
+    { seq: 20, type: 'assistant/message', channel: 'conversation', role: 'assistant', speaker: 'assistant',
+      snippet: 'answer needle', offset: 7, occurrences: 1,
+      location: { messageId: 'assistant-id', turn: 7, step: 2, contentIndex: 4, matchOffset: 7 } },
+    { seq: 20, type: 'assistant/message', channel: 'conversation', role: 'assistant', speaker: 'assistant',
+      snippet: 'needle again needle', offset: 0, occurrences: 2,
+      location: { messageId: 'assistant-id', turn: 7, step: 2, contentIndex: 5, matchOffset: 0 } },
+    { seq: 30, type: 'tool/result', channel: 'conversation', role: 'tool', speaker: 'tool',
+      snippet: 'result NEEDLE', offset: 7, occurrences: 1,
+      location: { messageId: 'tool-message-id', turn: 7, step: 2, callId: 'call-id', contentIndex: 1, matchOffset: 7 } },
+  ]);
+  assert.deepEqual(body.counts, { thinking: 1, conversation: 4 });
+  assert.equal(body.totalHits, 5);
+  assert.ok(body.hits.every(({ clippedStart, clippedEnd }) => clippedEnd === false));
+  assert.equal(body.hits[0].clippedStart, true);
+});
+
+test('locations omit absent identity fields and preserve zero turn and step without inferring user context', async () => {
+  const direct = user(1);
+  const nested = assistant(2, ['text', query]);
+  nested.data.turn = 0;
+  nested.data.step = 0;
+  const tool = {
+    seq: 3, type: 'tool/result', data: {
+      turn: 0, step: 0,
+      message: { role: 'tool', source: { kind: 'tool', callId: 'source-call-id' }, content: [{ type: 'text', text: query }] },
+    },
+  };
+  const { body } = await mount({ readSession: async () => ({ events: [direct, nested, tool] }) })().response;
+  assert.deepEqual(body.hits.map(({ location }) => location), [
+    { contentIndex: 0, matchOffset: 0 },
+    { turn: 0, step: 0, contentIndex: 0, matchOffset: 0 },
+    { turn: 0, step: 0, callId: 'source-call-id', contentIndex: 0, matchOffset: 0 },
+  ]);
+});
+
+for (const raw of [[], null]) {
+  test('document-only fallback has a document-relative offset but no invented message location: ' + JSON.stringify(raw), async () => {
+    const text = 'prefix\n\nsecond NEEDLE needle';
+    const { status, body } = await mount({
+      filterEvents: async () => [candidate(41, text)],
+      readSession: async () => { if (raw === null) throw new Error('Raw log unavailable'); return { events: raw }; },
+    })().response;
+    assert.equal(status, 200);
+    assert.deepEqual(body.hits[0].location, { matchOffset: 15 });
+    assert.equal(body.hits[0].seq, 41);
+    assert.equal(body.hits[0].type, 'user/message');
+    assert.equal(body.hits[0].snippet, 'second NEEDLE needle');
+    assert.equal(body.hits[0].offset, 7);
+    assert.equal(body.hits[0].occurrences, 2);
+    assert.equal(body.hits[0].role, null);
+  });
+}
+
+test('location match offsets use original UTF-16 text without changing existing Unicode snippet semantics', async () => {
+  const text = '\u0130\u{1f600} needle';
+  for (const fallback of [false, true]) {
+    const { body } = await mount({
+      filterEvents: async () => [candidate(1, text)],
+      readSession: async () => ({ events: fallback ? [] : [user(1, text)] }),
+    })().response;
+    assert.equal(body.hits[0].location.matchOffset, 4);
+    assert.equal(body.hits[0].offset, 5); // Existing lowercase-expanded snippet indexing is intentionally unchanged.
+    assert.equal(body.hits[0].snippet, text);
+    assert.equal(body.hits[0].occurrences, 1);
+  }
+});
+
 test('an ordinary search failure still sends the existing HTTP error', async () => {
   const request = mount({ listSessions: async () => { throw new Error('Listing failed'); } })();
   assert.deepEqual(await request.response, { status: 500, body: { error: 'search-failed', message: 'Listing failed' } });
