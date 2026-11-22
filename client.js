@@ -1939,6 +1939,16 @@ window.__ModuleLoader__.load({
           ),
         );
 
+      const renderPaneHead = (channel, labelKey) => h(
+        'div',
+        { className: 'dsh-find-pane-head' },
+        h('span', null, t(labelKey)),
+        channel === 'conversation' ? renderSpeakerChips() : null,
+        payload !== null && !state.loading && !state.error && state.searched.trim().length > 0
+          ? h('span', { className: 'dsh-find-pane-count' }, String(grouped[channel].flat))
+          : null,
+      );
+
       const renderPane = (channel, labelKey) => {
         const bundle = grouped[channel];
         const cards = [];
@@ -2032,13 +2042,7 @@ window.__ModuleLoader__.load({
         return h(
           'div',
           { key: channel, className: 'dsh-find-pane' },
-          h(
-            'div',
-            { className: 'dsh-find-pane-head' },
-            h('span', null, t(labelKey)),
-            channel === 'conversation' ? renderSpeakerChips() : null,
-            h('span', { className: 'dsh-find-pane-count' }, String(bundle.flat)),
-          ),
+          renderPaneHead(channel, labelKey),
           h(
             'div',
             { className: 'dsh-find-pane-body' },
@@ -2489,7 +2493,14 @@ window.__ModuleLoader__.load({
         }
 
         return standalone !== null
-          ? h('div', { className: 'dsh-find-body' }, standalone)
+          ? h(React.Fragment, null,
+              h('div', { className: 'dsh-find-panes', style: { flex: 'none' } },
+                PANES.map((entry) => h('div', { key: entry.channel, className: 'dsh-find-pane' },
+                  renderPaneHead(entry.channel, entry.labelKey),
+                )),
+              ),
+              h('div', { className: 'dsh-find-body' }, standalone),
+            )
           : h('div', { className: 'dsh-find-panes' }, PANES.map((entry) => renderPane(entry.channel, entry.labelKey)));
       };
 
