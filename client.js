@@ -425,7 +425,9 @@ window.__ModuleLoader__.load({
     }
 
     function setStore(patch) {
+      const previous = filterSnapshot();
       store = Object.assign({}, store, patch);
+      if (!restoringFilters) rememberFilterChanges(previous, filterSnapshot());
       for (const listener of Array.from(listeners)) {
         try {
           listener();
@@ -570,15 +572,135 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // Only these preferences are persisted; search results and transient UI stay in memory.
+    const FILTER_STORAGE_KEY = 'dsh-find.filters.v1';
+    const FILTER_SPEAKERS = { text: ['user', 'assistant', 'tool', 'system'], media: ['user', 'assistant'], files: ['user', 'assistant'] };
+    let restoringFilters = false;
+    let pendingFilters = {};
+    let filtersSupported = false;
+    let savingFilters = false;
+    let activeFilterPatch = {};
+
+    function filterSnapshot() {
+      return {
+        text: { hideArchived: store.hideArchived, speakers: store.speakers },
+        media: { hideArchived: store.mediaHideArchived, speakers: store.mediaSpeakers },
+        files: { hideArchived: store.files.hideArchived, speakers: store.files.speakers },
+      };
+    }
+
+    function mergeFilters(base, patch) {
+      const result = {};
+      for (const [tab, keys] of Object.entries(FILTER_SPEAKERS)) {
+        const row = {};
+        for (const input of [base?.[tab], patch?.[tab]]) {
+          if (typeof input?.hideArchived === 'boolean') row.hideArchived = input.hideArchived;
+          for (const key of keys) {
+            if (typeof input?.speakers?.[key] === 'boolean') {
+              (row.speakers ||= {})[key] = input.speakers[key];
+            }
+          }
+        }
+        if (Object.keys(row).length) result[tab] = row;
+      }
+      return result;
+    }
+
+    function applyFilters(filters) {
+      const next = mergeFilters(filterSnapshot(), filters);
+      restoringFilters = true;
+      try {
+        setStore({ hideArchived: next.text.hideArchived, speakers: next.text.speakers,
+          mediaHideArchived: next.media.hideArchived, mediaSpeakers: next.media.speakers,
+          files: { ...store.files, ...next.files } });
+      } finally { restoringFilters = false; }
+    }
+
+    function mirrorFilters() {
+      try {
+        window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify({ filters: filterSnapshot(), pending: mergeFilters(activeFilterPatch, pendingFilters) }));
+      } catch { /* The Host remains the durable store when browser storage is unavailable. */ }
+    }
+
+    function restoreLocalFilters() {
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(FILTER_STORAGE_KEY));
+        pendingFilters = mergeFilters({}, saved?.pending);
+        applyFilters(mergeFilters(saved?.filters, pendingFilters));
+      } catch { /* Missing, invalid or unavailable storage leaves the defaults intact. */ }
+    }
+
+    function rememberFilterChanges(before, after) {
+      const patch = {};
+      for (const [tab, keys] of Object.entries(FILTER_SPEAKERS)) {
+        const row = {};
+        if (before[tab].hideArchived !== after[tab].hideArchived) row.hideArchived = after[tab].hideArchived;
+        for (const key of keys) {
+          if (before[tab].speakers[key] !== after[tab].speakers[key]) (row.speakers ||= {})[key] = after[tab].speakers[key];
+        }
+        if (Object.keys(row).length) patch[tab] = row;
+      }
+      if (!Object.keys(patch).length) return;
+      pendingFilters = mergeFilters(pendingFilters, patch);
+      mirrorFilters();
+      void saveFilters();
+    }
+
+    async function saveFilters() {
+      if (!filtersSupported || savingFilters) return;
+      savingFilters = true;
+      try {
+        while (Object.keys(pendingFilters).length) {
+          const patch = pendingFilters;
+          activeFilterPatch = patch;
+          pendingFilters = {};
+          try {
+            const response = await fetch(ROUTE + '/settings', {
+              method: 'POST', keepalive: true,
+              headers: { 'content-type': 'application/json', accept: 'application/json' },
+              body: JSON.stringify({ filters: patch }),
+            });
+            const data = await response.json();
+            if (!response.ok || data?.ok !== true || !data.filters) throw new Error('Filter settings were not saved');
+          } catch (error) {
+            pendingFilters = mergeFilters(patch, pendingFilters);
+            activeFilterPatch = {};
+            mirrorFilters();
+            console.warn('[dsh-find] filter settings kept locally; Host save failed', error);
+            break;
+          }
+          activeFilterPatch = {};
+          mirrorFilters();
+        }
+      } finally { savingFilters = false; }
+    }
+
+    function restoreHostFilters(data) {
+      // Older Hosts accept only theme writes; never send them a filter-only POST.
+      if (!data?.filters || typeof data.filters !== 'object') return;
+      filtersSupported = true;
+      applyFilters(mergeFilters(data.filters, pendingFilters));
+      mirrorFilters();
+      void saveFilters();
+    }
+
+    let settingsLoad = null;
+    let localSettingsLoaded = false;
     function loadSettings() {
+      if (settingsLoad !== null) return settingsLoad;
       const local = readLocalTheme();
-      if (local !== '') setStore({ theme: local });
-      return fetch(ROUTE + '/settings', { headers: { accept: 'application/json' } })
+      if (!localSettingsLoaded) {
+        localSettingsLoaded = true;
+        restoreLocalFilters();
+        if (local !== '') setStore({ theme: local });
+      }
+      settingsLoad = fetch(ROUTE + '/settings', { headers: { accept: 'application/json' } })
         .then((response) => {
           if (!response.ok) throw new Error('unsupported');
           return response.json();
         })
         .then((data) => {
+          restoreHostFilters(data);
           if (data === null || typeof data !== 'object' || typeof data.theme !== 'string') return;
           if (data.saved === true) {
             const theme = normalizeTheme(data.theme);
@@ -597,8 +719,9 @@ window.__ModuleLoader__.load({
             });
         })
         .catch(() => {
-          /* no settings route: the mirror alone drives the palette */
+          settingsLoad = null; // Retry on the next open; retain all current selections.
         });
+      return settingsLoad;
     }
 
     /* ------------------------------------------------------------- search */
@@ -1251,6 +1374,7 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------ palette */
 
     function openPalette() {
+      void loadSettings().then(() => saveFilters());
       cancelJump();
       setStore({ jumpNotice: '' });
       const selection = readSelectionText();
@@ -1262,6 +1386,7 @@ window.__ModuleLoader__.load({
     }
 
     function openPaletteWith(query) {
+      void loadSettings().then(() => saveFilters());
       cancelJump();
       setStore({ jumpNotice: '' });
       scheduleSearch(query, { open: true, tab: 'text', notice: '', preview: null, menu: null });

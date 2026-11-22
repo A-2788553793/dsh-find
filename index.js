@@ -129,6 +129,37 @@ function byteLength(text) {
 /** The palette may either follow the host theme or pin itself to one theme. */
 const THEME_VALUES = ['auto', 'dark', 'light'];
 const DEFAULT_SETTINGS = { theme: 'auto' };
+const FILTER_SPEAKERS = {
+  text: ['user', 'assistant', 'tool', 'system'],
+  media: ['user', 'assistant'],
+  files: ['user', 'assistant'],
+};
+
+function isSettingsObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Normalize stored values and optionally merge a partial update into them. */
+function normalizeFilters(value, base) {
+  const next = {};
+  for (const [tab, speakers] of Object.entries(FILTER_SPEAKERS)) {
+    const filter = { hideArchived: false, speakers: Object.fromEntries(speakers.map((speaker) => [speaker, true])) };
+    for (const source of [base, value]) {
+      if (!isSettingsObject(source) || !Object.hasOwn(source, tab)) continue;
+      const patch = source[tab];
+      if (!isSettingsObject(patch)) continue;
+      if (Object.hasOwn(patch, 'hideArchived') && typeof patch.hideArchived === 'boolean') filter.hideArchived = patch.hideArchived;
+      if (!isSettingsObject(patch.speakers)) continue;
+      for (const speaker of speakers) {
+        if (Object.hasOwn(patch.speakers, speaker) && typeof patch.speakers[speaker] === 'boolean') {
+          filter.speakers[speaker] = patch.speakers[speaker];
+        }
+      }
+    }
+    next[tab] = filter;
+  }
+  return next;
+}
 
 function settingsDir() {
   return join(dshHome(), 'storages', 'dsh-find');
@@ -145,15 +176,21 @@ function normalizeTheme(value) {
 function readSettings() {
   try {
     const parsed = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
-    return { theme: normalizeTheme(parsed !== null && typeof parsed === 'object' ? parsed.theme : undefined) };
+    return {
+      theme: normalizeTheme(isSettingsObject(parsed) ? parsed.theme : undefined),
+      filters: normalizeFilters(isSettingsObject(parsed) ? parsed.filters : undefined),
+    };
   } catch (err) {
-    return Object.assign({}, DEFAULT_SETTINGS);
+    return { ...DEFAULT_SETTINGS, filters: normalizeFilters() };
   }
 }
 
 function writeSettings(patch) {
-  const next = Object.assign(readSettings(), patch);
-  next.theme = normalizeTheme(next.theme);
+  const next = readSettings();
+  if (isSettingsObject(patch)) {
+    if (Object.hasOwn(patch, 'theme')) next.theme = normalizeTheme(patch.theme);
+    next.filters = normalizeFilters(patch.filters, next.filters);
+  }
   try {
     fs.mkdirSync(settingsDir(), { recursive: true });
     fs.writeFileSync(settingsFile(), JSON.stringify(next, null, 2) + '\n', 'utf8');
@@ -1974,8 +2011,7 @@ async function handleRequest(ctx, req, res) {
     if ((req.method ?? 'GET').toUpperCase() === 'POST') {
       readJsonBody(req, 8192)
         .then((body) => {
-          const theme = normalizeTheme(body !== null && typeof body === 'object' ? body.theme : undefined);
-          const result = writeSettings({ theme });
+          const result = writeSettings(body);
           sendJson(res, result.ok === false ? 500 : 200, result);
         })
         .catch((err) => {
