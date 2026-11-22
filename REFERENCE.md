@@ -19,7 +19,7 @@
   - `ctx.workspaceRegistry.archivedSessionIds`（登记表全局的归档集合）给每条命中打 `archived` 标记，
     并把归档会话整体排到普通会话之后；
   - 8 路并发；客户端断开（`res.on('close')`）时用 `AbortController` 取消。
-- **Client 半**（`client.js`）：只用 `fetch` 调上面的路由，UI 挂在 `shell.overlay` 槽位（id `dsh-find-dialog`），
+- **Client 半**（`client.js`）：用 `fetch` 调上面的数据路由，通过 DSH 原生会话服务完成跳转与节点定位，UI 挂在 `shell.overlay` 槽位（id `dsh-find-dialog`），
   键盘捕获挂在 `document` 的 `keydown`（捕获阶段，`preventDefault` 掉浏览器原生查找）。
 - **命令桥**（`/find-text-ui`）：命令只能在 Host 半注册（`ctx.commands.register`），而面板在页面里，
   所以用一个长轮询把手：
@@ -44,11 +44,15 @@
     { "sessionId": "...", "title": "...", "workspaceTitle": "插件", "archived": true,
       "seq": 412, "type": "assistant/message", "role": "assistant",
       "channel": "thinking",          // thinking | conversation
+      "location": { "messageId": "...", "turn": 2, "step": 1,
+                    "contentIndex": 0, "matchOffset": 18 },
       "snippet": "...", "occurrences": 2,
       "clippedStart": false, "clippedEnd": true }
   ]
 }
 ```
+
+`location` 用于把搜索命中对应回原始消息：`contentIndex` 是原消息 `content` 数组中的块下标，`matchOffset` 是该块原文内首个命中的 UTF-16 偏移。`messageId`、`turn`、`step` 以及工具结果的 `callId` 仅在原记录实际携带时返回；客户端不会把事件 `seq` 当作界面节点 ID。
 
 ### 查询参数
 
@@ -95,6 +99,15 @@
 - `POST /dsh-find/files/reveal?id=<文件 ID>`：在 Windows 宿主上打开文件所在目录。浏览器只传宿主发给它的文件 ID，不传本地路径。
 
 ## 更新日志
+
+### 0.4.3
+
+相比 0.4.2 的改动：
+
+- **搜索结果定位更准确**：根据原始消息和会话界面的节点对应关系定位，区分思考链、正文与工具结果，避免跳到其他消息中相同的文字。
+- **命中文字高亮 3 秒**：成功精确定位后，以黄色背景、深色文字突出命中词，兼顾深色和浅色主题；高亮自动消失，不改变文字排版或当前选区。
+- **定位过程更可控**：连续点击结果时只保留最后一次跳转；手动滚动、切换对话或重新打开查找面板时取消正在进行的定位，避免旧请求抢回位置。
+- **定位反馈更明确**：无法安全确认具体文字或浏览器不支持文字高亮时，退到消息级定位并显示提示；目标不可用或定位超时也会明确提示。归档对话仍需先取消归档。
 
 ### 0.4.2
 
