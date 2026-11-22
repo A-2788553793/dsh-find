@@ -10,7 +10,7 @@ function defaultFilters() {
   return {
     text: { hideArchived: false, speakers: { user: true, assistant: true, tool: true, system: true } },
     media: { hideArchived: false, speakers: { user: true, assistant: true } },
-    files: { hideArchived: false, speakers: { user: true, assistant: true } },
+    files: { hideArchived: false, hideMedia: false, speakers: { user: true, assistant: true } },
   };
 }
 
@@ -59,6 +59,7 @@ test('filters persist in the existing file and survive a fresh module load', asy
   filters.media.speakers.assistant = false;
   filters.files.hideArchived = true;
   filters.files.speakers.user = false;
+  filters.files.hideMedia = true;
   assert.deepEqual(await request('POST', { filters }), { status: 200, body: { ok: true, theme: 'auto', filters } });
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { theme: 'auto', filters });
   const fresh = await import('./index.js?settings-persistence-test');
@@ -134,5 +135,25 @@ test('malformed and oversized POST bodies return 400 without changing storage', 
     assert.equal(result.status, 400);
     assert.equal(result.body.error, 'bad-body');
     assert.equal(await readFile(file, 'utf8'), before);
+  }
+});
+
+
+test('hideMedia is file-only, merges independently, and persists both boolean values', async (t) => {
+  const { file, request } = await fixture(t);
+  const filters = defaultFilters();
+  filters.text.hideArchived = true;
+  filters.files.speakers.assistant = false;
+  await request('POST', { theme: 'dark', filters });
+  for (const enabled of [true, false]) {
+    filters.files.hideMedia = enabled;
+    const result = await request('POST', { filters: { files: { hideMedia: enabled }, text: { hideMedia: true }, media: { hideMedia: true } } });
+    assert.deepEqual(result.body, { ok: true, theme: 'dark', filters });
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      assert.deepEqual((await request('POST', { filters: { files: { hideMedia: invalid } } })).body, { ok: true, theme: 'dark', filters });
+    }
+    await request('POST', { theme: 'dark' });
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { theme: 'dark', filters });
+    assert.deepEqual((await mount()()).body.filters, filters);
   }
 });

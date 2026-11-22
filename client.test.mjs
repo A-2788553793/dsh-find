@@ -920,3 +920,41 @@ test('reopening retries a failed POST even when the successful settings load is 
   await respond(retry, { ok: true, filters: defaultFilters() });
   assert.equal(filterControls(ui, 'Files').archive.props.checked, true);
 });
+
+
+test('file hide-media preference restores locally and from Host without changing other filters', async () => {
+  const storage = memoryStorage();
+  const hideMedia = (ui) => {
+    ui.tab('Files');
+    const label = nodes(ui.filePanel()).find(node => node.type === 'label' && nodes(node).some(child => child.children?.includes('Hide Images/Videos')));
+    return nodes(label).find(node => node.type === 'input');
+  };
+  const ui = mount({ storage, settings: true });
+  // Older records omit hideMedia; the default remains unchecked.
+  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: defaultFilters() });
+  assert.equal(hideMedia(ui).props.checked, false);
+  hideMedia(ui).props.onChange({ target: { checked: true } });
+  const save = ui.take('/settings');
+  assert.deepEqual(JSON.parse(save.options.body), { filters: { files: { hideMedia: true } } });
+  const filters = defaultFilters();
+  filters.files.hideMedia = true;
+  await respond(save, { ok: true, filters });
+  const localReload = mount({ storage });
+  assert.equal(hideMedia(localReload).props.checked, true);
+  const hostReload = mount({ settings: true });
+  await respond(hostReload.take('/settings'), { ok: true, saved: true, theme: 'auto', filters });
+  assert.equal(hideMedia(hostReload).props.checked, true);
+  for (const tab of ['Text', 'Images/Videos', 'Files']) {
+    const controls = filterControls(hostReload, tab);
+    assert.equal(controls.archive.props.checked, false);
+    assert.equal(controls.speaker('user').props['data-on'], 'true');
+    assert.equal(controls.speaker('assistant').props['data-on'], 'true');
+  }
+  hideMedia(localReload).props.onChange({ target: { checked: false } });
+  assert.equal(hideMedia(mount({ storage })).props.checked, false);
+  hideMedia(hostReload).props.onChange({ target: { checked: false } });
+  const reset = hostReload.take('/settings');
+  assert.deepEqual(JSON.parse(reset.options.body), { filters: { files: { hideMedia: false } } });
+  filters.files.hideMedia = false;
+  await respond(reset, { ok: true, filters });
+});

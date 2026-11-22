@@ -585,7 +585,7 @@ window.__ModuleLoader__.load({
       return {
         text: { hideArchived: store.hideArchived, speakers: store.speakers },
         media: { hideArchived: store.mediaHideArchived, speakers: store.mediaSpeakers },
-        files: { hideArchived: store.files.hideArchived, speakers: store.files.speakers },
+        files: { hideArchived: store.files.hideArchived, hideMedia: store.files.hideMedia, speakers: store.files.speakers },
       };
     }
 
@@ -595,6 +595,7 @@ window.__ModuleLoader__.load({
         const row = {};
         for (const input of [base?.[tab], patch?.[tab]]) {
           if (typeof input?.hideArchived === 'boolean') row.hideArchived = input.hideArchived;
+          if (tab === 'files' && typeof input?.hideMedia === 'boolean') row.hideMedia = input.hideMedia;
           for (const key of keys) {
             if (typeof input?.speakers?.[key] === 'boolean') {
               (row.speakers ||= {})[key] = input.speakers[key];
@@ -635,6 +636,7 @@ window.__ModuleLoader__.load({
       for (const [tab, keys] of Object.entries(FILTER_SPEAKERS)) {
         const row = {};
         if (before[tab].hideArchived !== after[tab].hideArchived) row.hideArchived = after[tab].hideArchived;
+        if (tab === 'files' && before[tab].hideMedia !== after[tab].hideMedia) row.hideMedia = after[tab].hideMedia;
         for (const key of keys) {
           if (before[tab].speakers[key] !== after[tab].speakers[key]) (row.speakers ||= {})[key] = after[tab].speakers[key];
         }
