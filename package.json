@@ -1,6 +1,6 @@
 {
   "name": "dsh-find",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Local Ctrl+F history search, media browsing, and conversation file lookup in DeepSeek Harness.",
   "type": "module",
   "license": "MIT",

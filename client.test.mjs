@@ -178,6 +178,8 @@ test('only the visible tab derives data and creates text hits; returning preserv
   ui.button('Find');
   await respond(ui.take('/search'), { get hits() { textReads++; return hits; }, totalHits: 3 });
   const highlights = () => nodes(ui.render()).filter((node) => node.type.name === 'Highlighted');
+  assert.equal(filterControls(ui, 'Text').archive.props.checked, true);
+  filterControls(ui, 'Text').archive.props.onChange({ target: { checked: false } });
   assert.deepEqual(highlights().map((node) => node.props.text), ['keyword thinking', 'keyword message', 'keyword archived']);
   const renderedHighlight = highlights()[0].type(highlights()[0].props);
   assert.ok(nodes(renderedHighlight).some((node) => node.type === 'mark' && node.children.includes('keyword')));
@@ -648,7 +650,7 @@ test('media row window keeps fixed space, mounts successive groups, resizes, and
 test('archive and speaker filters remain independent across all three tabs', () => {
   const ui = mount();
   const tabs = ['Text', 'Images/Videos', 'Files'];
-  const expected = tabs.map((_, i) => ({ archived: false, speakers: Object.fromEntries(
+  const expected = tabs.map((_, i) => ({ archived: true, speakers: Object.fromEntries(
     (i === 0 ? ['user', 'assistant', 'tool', 'system'] : ['user', 'assistant']).map(key => [key, true]),
   ) }));
   const view = (i) => {
@@ -670,7 +672,7 @@ test('archive and speaker filters remain independent across all three tabs', () 
     }
   };
   verify();
-  for (const enabled of [true, false]) {
+  for (const enabled of [false, true]) {
     for (let i = 0; i < tabs.length; i++) {
       archive(view(i)).props.onChange({ target: { checked: enabled } });
       expected[i].archived = enabled;
@@ -694,6 +696,7 @@ test('media archive filter updates items and sessions independently of text filt
   const archive = () => ui.find(node => node.type === 'input' && node.props.type === 'checkbox');
   archive().props.onChange({ target: { checked: true } });
   ui.tab('Images/Videos');
+  archive().props.onChange({ target: { checked: false } });
   const data = tree('active', 'archived');
   data.workspaces[0].sessions[1].archived = true;
   await respond(ui.take('/media/tree'), data);
@@ -729,8 +732,10 @@ function filterControls(ui, tab) {
     speaker: key => all.find(node => node.type === 'button' && node.props['data-speaker'] === key),
   };
 }
-const defaultFilters = () => Object.fromEntries(['text', 'media', 'files'].map(tab => [tab, {
+// Existing saved preferences deliberately differ from the first-install defaults.
+const savedFilters = () => Object.fromEntries(['text', 'media', 'files'].map(tab => [tab, {
   hideArchived: false,
+  ...(tab === 'files' ? { hideMedia: false } : {}),
   speakers: Object.fromEntries((tab === 'text' ? ['user', 'assistant', 'tool', 'system'] : ['user', 'assistant']).map(key => [key, true])),
 }]));
 
@@ -765,7 +770,7 @@ test('all tab preferences restore independently in a fresh client and remember r
 
 test('Host settings restore without browser storage and do not trigger a redundant save', async () => {
   const ui = mount({ settings: true });
-  const filters = defaultFilters();
+  const filters = savedFilters();
   filters.text.hideArchived = true;
   filters.media.speakers.user = false;
   filters.files.speakers.assistant = false;
@@ -780,7 +785,7 @@ test('late Host load preserves fresh clicks and rapid changes save serially', as
   const storage = memoryStorage();
   const ui = mount({ storage, settings: true });
   filterControls(ui, 'Text').speaker('user').props.onClick(event);
-  const filters = defaultFilters();
+  const filters = savedFilters();
   filters.files.hideArchived = true;
   await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters });
   assert.equal(filterControls(ui, 'Text').speaker('user').props['data-on'], 'false');
@@ -805,7 +810,7 @@ test('late Host load preserves fresh clicks and rapid changes save serially', as
 test('closing during a save keeps both in-flight and later changes for the next client', async () => {
   const storage = memoryStorage();
   const ui = mount({ storage, settings: true });
-  const filters = defaultFilters();
+  const filters = savedFilters();
   await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters });
   filterControls(ui, 'Text').speaker('system').props.onClick(event);
   const first = ui.take('/settings');
@@ -828,7 +833,7 @@ test('corrupt or blocked local storage leaves defaults and an older Host never r
   }]) {
     const ui = mount({ storage, settings: true });
     await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto' });
-    assert.equal(filterControls(ui, 'Text').archive.props.checked, false);
+    assert.equal(filterControls(ui, 'Text').archive.props.checked, true);
     filterControls(ui, 'Text').speaker('user').props.onClick(event);
     assert.equal(ui.requests.some(request => request.key === '/settings'), false);
     assert.equal(filterControls(ui, 'Images/Videos').speaker('user').props['data-on'], 'true');
@@ -838,7 +843,7 @@ test('corrupt or blocked local storage leaves defaults and an older Host never r
 
 test('failed Host save survives a restart and retries without resetting other tabs', async () => {
   const storage = memoryStorage();
-  const filters = defaultFilters();
+  const filters = savedFilters();
   filters.media.speakers.assistant = false;
   const ui = mount({ storage, settings: true });
   await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters });
@@ -863,9 +868,9 @@ test('settings page and palette share one load and cannot replay stale filters a
   ui.close();
   ui.open();
   assert.equal(ui.requests.filter(request => request.key === '/settings').length, 1);
-  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: defaultFilters() });
+  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: savedFilters() });
   filterControls(ui, 'Text').speaker('user').props.onClick(event);
-  await respond(ui.take('/settings'), { ok: true, filters: defaultFilters() });
+  await respond(ui.take('/settings'), { ok: true, filters: savedFilters() });
   ui.settingsPanel();
   ui.close();
   ui.open();
@@ -878,19 +883,21 @@ test('reopening retries a failed initial load without losing choices made while 
   const ui = mount({ storage: memoryStorage(), settings: true });
   ui.take('/settings').reject(new Error('offline'));
   await flush();
-  filterControls(ui, 'Text').archive.props.onChange({ target: { checked: true } });
+  filterControls(ui, 'Text').archive.props.onChange({ target: { checked: false } });
   ui.close();
   ui.open();
-  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: defaultFilters() });
-  assert.equal(filterControls(ui, 'Text').archive.props.checked, true);
+  const staleFilters = savedFilters();
+  staleFilters.text.hideArchived = true;
+  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: staleFilters });
+  assert.equal(filterControls(ui, 'Text').archive.props.checked, false);
   const save = ui.take('/settings');
-  assert.deepEqual(JSON.parse(save.options.body), { filters: { text: { hideArchived: true } } });
-  await respond(save, { ok: true, filters: defaultFilters() });
+  assert.deepEqual(JSON.parse(save.options.body), { filters: { text: { hideArchived: false } } });
+  await respond(save, { ok: true, filters: savedFilters() });
 });
 
 
 test('Host load retry does not restore stale local values when local writes fail', async () => {
-  const storage = { getItem: key => key === filterStorageKey ? JSON.stringify({ filters: defaultFilters(), pending: {} }) : null,
+  const storage = { getItem: key => key === filterStorageKey ? JSON.stringify({ filters: savedFilters(), pending: {} }) : null,
     setItem() { throw new Error('quota'); } };
   const ui = mount({ storage, settings: true });
   ui.take('/settings').reject(new Error('offline'));
@@ -898,16 +905,16 @@ test('Host load retry does not restore stale local values when local writes fail
   filterControls(ui, 'Text').speaker('tool').props.onClick(event);
   ui.close();
   ui.open();
-  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: defaultFilters() });
+  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: savedFilters() });
   assert.equal(filterControls(ui, 'Text').speaker('tool').props['data-on'], 'false');
   const save = ui.take('/settings');
   assert.deepEqual(JSON.parse(save.options.body), { filters: { text: { speakers: { tool: false } } } });
-  await respond(save, { ok: true, filters: defaultFilters() });
+  await respond(save, { ok: true, filters: savedFilters() });
 });
 
 test('reopening retries a failed POST even when the successful settings load is cached', async () => {
   const ui = mount({ storage: memoryStorage(), settings: true });
-  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: defaultFilters() });
+  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: savedFilters() });
   filterControls(ui, 'Files').archive.props.onChange({ target: { checked: true } });
   ui.take('/settings').reject(new Error('offline'));
   await flush();
@@ -917,7 +924,7 @@ test('reopening retries a failed POST even when the successful settings load is 
   const retry = ui.take('/settings');
   assert.equal(retry.options.method, 'POST');
   assert.deepEqual(JSON.parse(retry.options.body), { filters: { files: { hideArchived: true } } });
-  await respond(retry, { ok: true, filters: defaultFilters() });
+  await respond(retry, { ok: true, filters: savedFilters() });
   assert.equal(filterControls(ui, 'Files').archive.props.checked, true);
 });
 
@@ -930,13 +937,13 @@ test('file hide-media preference restores locally and from Host without changing
     return nodes(label).find(node => node.type === 'input');
   };
   const ui = mount({ storage, settings: true });
-  // Older records omit hideMedia; the default remains unchecked.
-  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: defaultFilters() });
+  // An explicitly saved false must override the new checked default.
+  await respond(ui.take('/settings'), { ok: true, saved: true, theme: 'auto', filters: savedFilters() });
   assert.equal(hideMedia(ui).props.checked, false);
   hideMedia(ui).props.onChange({ target: { checked: true } });
   const save = ui.take('/settings');
   assert.deepEqual(JSON.parse(save.options.body), { filters: { files: { hideMedia: true } } });
-  const filters = defaultFilters();
+  const filters = savedFilters();
   filters.files.hideMedia = true;
   await respond(save, { ok: true, filters });
   const localReload = mount({ storage });
@@ -957,4 +964,38 @@ test('file hide-media preference restores locally and from Host without changing
   assert.deepEqual(JSON.parse(reset.options.body), { filters: { files: { hideMedia: false } } });
   filters.files.hideMedia = false;
   await respond(reset, { ok: true, filters });
+});
+
+
+test('first install checks all hide filters before and after settings load', async () => {
+  const ui = mount({ storage: memoryStorage(), settings: true });
+  const verify = () => {
+    for (const tab of ['Text', 'Images/Videos', 'Files']) {
+      assert.equal(filterControls(ui, tab).archive.props.checked, true, tab);
+    }
+    const label = nodes(ui.filePanel()).find(node => node.type === 'label' && nodes(node).some(child => child.children?.includes('Hide Images/Videos')));
+    assert.equal(nodes(label).find(node => node.type === 'input').props.checked, true);
+  };
+  verify();
+  const filters = savedFilters();
+  for (const row of Object.values(filters)) row.hideArchived = true;
+  filters.files.hideMedia = true;
+  await respond(ui.take('/settings'), { ok: true, saved: false, theme: 'auto', filters });
+  verify();
+  assert.equal(ui.requests.some(request => request.key === '/settings'), false);
+});
+
+test('saved unchecked filters override defaults in local storage and Host settings', async () => {
+  const filters = savedFilters();
+  const storage = memoryStorage({ [filterStorageKey]: JSON.stringify({ filters, pending: {} }) });
+  const local = mount({ storage });
+  const host = mount({ settings: true });
+  await respond(host.take('/settings'), { ok: true, saved: true, theme: 'auto', filters });
+  for (const ui of [local, host]) {
+    for (const tab of ['Text', 'Images/Videos', 'Files']) {
+      assert.equal(filterControls(ui, tab).archive.props.checked, false, tab);
+    }
+    const label = nodes(ui.filePanel()).find(node => node.type === 'label' && nodes(node).some(child => child.children?.includes('Hide Images/Videos')));
+    assert.equal(nodes(label).find(node => node.type === 'input').props.checked, false);
+  }
 });

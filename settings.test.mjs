@@ -8,9 +8,9 @@ import { apply } from './index.js';
 
 function defaultFilters() {
   return {
-    text: { hideArchived: false, speakers: { user: true, assistant: true, tool: true, system: true } },
-    media: { hideArchived: false, speakers: { user: true, assistant: true } },
-    files: { hideArchived: false, hideMedia: false, speakers: { user: true, assistant: true } },
+    text: { hideArchived: true, speakers: { user: true, assistant: true, tool: true, system: true } },
+    media: { hideArchived: true, speakers: { user: true, assistant: true } },
+    files: { hideArchived: true, hideMedia: true, speakers: { user: true, assistant: true } },
   };
 }
 
@@ -156,4 +156,17 @@ test('hideMedia is file-only, merges independently, and persists both boolean va
     assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { theme: 'dark', filters });
     assert.deepEqual((await mount()()).body.filters, filters);
   }
+});
+
+
+test('stored unchecked filters survive new defaults and unrelated updates', async (t) => {
+  const { file, request } = await fixture(t);
+  const filters = defaultFilters();
+  for (const row of Object.values(filters)) row.hideArchived = false;
+  filters.files.hideMedia = false;
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ theme: 'auto', filters }));
+  assert.deepEqual((await request()).body.filters, filters);
+  assert.deepEqual((await request('POST', { theme: 'dark' })).body.filters, filters);
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).filters, filters);
 });

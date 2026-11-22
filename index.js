@@ -143,8 +143,8 @@ function isSettingsObject(value) {
 function normalizeFilters(value, base) {
   const next = {};
   for (const [tab, speakers] of Object.entries(FILTER_SPEAKERS)) {
-    const filter = { hideArchived: false, speakers: Object.fromEntries(speakers.map((speaker) => [speaker, true])) };
-    if (tab === 'files') filter.hideMedia = false;
+    const filter = { hideArchived: true, speakers: Object.fromEntries(speakers.map((speaker) => [speaker, true])) };
+    if (tab === 'files') filter.hideMedia = true;
     for (const source of [base, value]) {
       if (!isSettingsObject(source) || !Object.hasOwn(source, tab)) continue;
       const patch = source[tab];
