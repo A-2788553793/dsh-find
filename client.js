@@ -253,9 +253,9 @@ window.__ModuleLoader__.load({
       '.dsh-find-submit:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;}',
       '.dsh-find-status{flex:none;font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap;}',
       '.dsh-find-panes{flex:1;min-height:0;display:flex;align-items:stretch;}',
-      '.dsh-find-pane{flex:1 1 50%;min-width:0;display:flex;flex-direction:column;min-height:0;}',
+      '.dsh-find-pane{flex:1 1 50%;min-width:0;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;}',
       '.dsh-find-pane + .dsh-find-pane{border-left:2px solid var(--dsw-alias-border-l1);}',
-      '.dsh-find-pane-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px 8px;font-size:14px;font-weight:700;letter-spacing:.01em;color:var(--dsw-alias-label-primary);border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
+      '.dsh-find-pane-head{flex:none;display:flex;align-items:center;gap:8px;height:40px;box-sizing:border-box;padding:10px 14px 8px;font-size:14px;line-height:20px;white-space:nowrap;font-weight:700;letter-spacing:.01em;color:var(--dsw-alias-label-primary);border-bottom:0.5px solid var(--dsw-alias-border-l1);}',
       '.dsh-find-pane-count{margin-left:auto;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-secondary);}',
       '.dsh-find-chips{display:flex;align-items:center;gap:5px;margin-left:12px;}',
       '.dsh-find-chip{font-family:inherit;font-size:11px;font-weight:500;line-height:1.7;padding:0 9px;border-radius:999px;border:0.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);cursor:pointer;white-space:nowrap;transition:background .12s,color .12s,border-color .12s;}',
@@ -1454,7 +1454,7 @@ window.__ModuleLoader__.load({
       );
       const head = h(
         'div', { className: 'dsh-find-head dsh-find-files-head' },
-        files.tree === null ? null : h('span', { className: 'dsh-find-media-summary' }, t('filesOutline', {
+        h('span', { className: 'dsh-find-media-summary' }, files.tree === null ? null : t('filesOutline', {
           workspaces: workspaces.length, sessions: sessionCount, loaded: fileCount,
         })),
         h('div', { className: 'dsh-find-chips' }, ['user', 'assistant'].map((speaker) => h('button', {
