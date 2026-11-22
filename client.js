@@ -396,6 +396,7 @@ window.__ModuleLoader__.load({
       expanding: false,
       expanded: {},
       sessionMedia: {},
+      mediaHideArchived: false,
       mediaSpeakers: { user: true, assistant: true },
       files: {
         tree: null,
@@ -1869,7 +1870,7 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, [state.open]);
 
-      const { payload, tab, mediaTree, mediaSpeakers, sessionMedia, speakers, hideArchived } = state;
+      const { payload, tab, mediaTree, mediaSpeakers, sessionMedia, speakers, hideArchived, mediaHideArchived } = state;
       const isText = state.open && tab === 'text';
       const isMedia = state.open && tab === 'media';
       const textView = React.useMemo(() => {
@@ -1893,13 +1894,13 @@ window.__ModuleLoader__.load({
         for (const [id, entry] of Object.entries(sessionMedia)) {
           if (entry.status !== 'ready' && !Array.isArray(entry.items)) continue;
           const shown = (entry.items || []).filter((item) =>
-            mediaSpeakers[mediaSpeakerOf(item)] !== false && (!hideArchived || item.archived !== true),
+            mediaSpeakers[mediaSpeakerOf(item)] !== false && (!mediaHideArchived || item.archived !== true),
           );
           shownBySession.set(id, shown);
           loadedMediaCount += shown.length;
         }
         return { shownBySession, loadedMediaCount };
-      }, [isMedia, sessionMedia, mediaSpeakers, hideArchived]);
+      }, [isMedia, sessionMedia, mediaSpeakers, mediaHideArchived]);
 
       if (!state.open) return state.jumpNotice ? h(React.Fragment, null,
         h('style', null, CSS),
@@ -2147,8 +2148,8 @@ window.__ModuleLoader__.load({
             { className: 'dsh-find-toggle', title: t('hideArchivedHint') },
             h('input', {
               type: 'checkbox',
-              checked: state.hideArchived === true,
-              onChange: (event) => setStore({ hideArchived: event.target.checked }),
+              checked: mediaHideArchived === true,
+              onChange: (event) => setStore({ mediaHideArchived: event.target.checked }),
             }),
             h('span', null, t('hideArchived')),
           ),
@@ -2303,7 +2304,7 @@ window.__ModuleLoader__.load({
             const key = workspaceKey(workspace);
             const isOpen = expandedMap[key] === true;
             const sessions = workspace.sessions.filter(
-              (session) => state.hideArchived !== true || session.archived !== true,
+              (session) => mediaHideArchived !== true || session.archived !== true,
             );
             const loadedHere = sessions.reduce((total, session) => total + shownMediaOf(session.sessionId).length, 0);
             return h(

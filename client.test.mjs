@@ -635,3 +635,73 @@ test('media row window keeps fixed space, mounts successive groups, resizes, and
   assert.equal(scroll, undefined);
   assert.equal(frame, undefined);
 });
+
+
+test('archive and speaker filters remain independent across all three tabs', () => {
+  const ui = mount();
+  const tabs = ['Text', 'Images/Videos', 'Files'];
+  const expected = tabs.map((_, i) => ({ archived: false, speakers: Object.fromEntries(
+    (i === 0 ? ['user', 'assistant', 'tool', 'system'] : ['user', 'assistant']).map(key => [key, true]),
+  ) }));
+  const view = (i) => {
+    ui.tab(tabs[i]);
+    return nodes(i === 2 ? ui.filePanel() : ui.render());
+  };
+  const archive = (all) => {
+    const label = all.find(node => node.type === 'label' && nodes(node).some(child => child.children?.includes('Hide archived')));
+    return nodes(label).find(node => node.type === 'input');
+  };
+  const chip = (all, key) => all.find(node => node.type === 'button' && node.props['data-speaker'] === key);
+  const verify = () => {
+    for (let i = 0; i < tabs.length; i++) {
+      const all = view(i);
+      assert.equal(archive(all).props.checked, expected[i].archived, tabs[i] + ' archive');
+      for (const [key, enabled] of Object.entries(expected[i].speakers)) {
+        assert.equal(chip(all, key).props['data-on'], String(enabled), tabs[i] + ' ' + key);
+      }
+    }
+  };
+  verify();
+  for (const enabled of [true, false]) {
+    for (let i = 0; i < tabs.length; i++) {
+      archive(view(i)).props.onChange({ target: { checked: enabled } });
+      expected[i].archived = enabled;
+      verify();
+    }
+  }
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < tabs.length; i++) {
+      for (const key of Object.keys(expected[i].speakers)) {
+        chip(view(i), key).props.onClick(event);
+        expected[i].speakers[key] = !expected[i].speakers[key];
+        verify();
+      }
+    }
+  }
+});
+
+
+test('media archive filter updates items and sessions independently of text filter', async () => {
+  const ui = mount();
+  const archive = () => ui.find(node => node.type === 'input' && node.props.type === 'checkbox');
+  archive().props.onChange({ target: { checked: true } });
+  ui.tab('Images/Videos');
+  const data = tree('active', 'archived');
+  data.workspaces[0].sessions[1].archived = true;
+  await respond(ui.take('/media/tree'), data);
+  await respond(await startBatch(ui), { truncated: false, items: [
+    item('active', 'active.png'), { ...item('archived', 'archived.png'), archived: true },
+  ] });
+  const tiles = () => nodes(ui.render()).filter(ui.byClass('dsh-find-tile')).map(node => node.props.title);
+  const rows = () => nodes(ui.render()).filter(ui.byClass('dsh-find-session-row'));
+  assert.equal(archive().props.checked, false);
+  assert.deepEqual(tiles(), ['active.png', 'archived.png']);
+  assert.equal(rows().length, 2);
+  archive().props.onChange({ target: { checked: true } });
+  assert.deepEqual(tiles(), ['active.png']);
+  assert.equal(rows().length, 1);
+  archive().props.onChange({ target: { checked: false } });
+  assert.deepEqual(tiles(), ['active.png', 'archived.png']);
+  ui.tab('Text');
+  assert.equal(archive().props.checked, true);
+});
